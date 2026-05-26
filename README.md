@@ -47,4 +47,4 @@ Outputs (Fourier transform, phase, amplitude) can be saved from the plugin’s s
 | `tools/` | Optional dev scripts (parity checks) |
 
 
- Nancy 2026
+ Nancy Burgos 2026
