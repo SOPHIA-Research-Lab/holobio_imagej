@@ -1,0 +1,22 @@
+# Build output
+build/
+build_*/
+*.class
+
+# Local / IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+Thumbs.db
+.Desktop
+.DS_Store
+
+# Personal or third-party bundles (do not publish)
+*.pdf
+NumericalPropagation*/
+jython/
+
+# Large parity test binaries
+tools/parity_workspace/*.f32
