@@ -19,18 +19,13 @@ final class HoloBioVortexLegendre {
         // Python: M×M square crop; FFT at native size (pad to next POT when needed, never center-crop down).
         SquareCrop sc = cropToSquare(inp, width, height);
         int squareSide = sc.width;
-        int processSide;
-        double[] holo;
-        if (isPowerOfTwo(squareSide)) {
-            processSide = squareSide;
-            holo = sc.data.clone();
-        } else {
-            processSide = nextPowerOfTwo(squareSide);
-            holo = padCenterToSquare(sc.data, squareSide, processSide);
-        }
+        // Python vortexLegendre FFTs the square crop at native size (960×960 here), not a
+        // padded power-of-two. Padding changes every frequency bin and the phase profile.
+        int processSide = squareSide;
+        double[] holo = sc.data.clone();
         int rows = processSide;
         int cols = processSide;
-        int coordOff = (squareSide - processSide) / 2;
+        int coordOff = 0;
 
         double wavelength = wavelengthUm * 1e-6;
         double dx = dxUm * 1e-6;
@@ -62,15 +57,63 @@ final class HoloBioVortexLegendre {
         sanitizeComplex(out);
         HoloBioCompensationAlgorithms.ComplexField squareOut =
                 upsampleComplexField(out, processSide, squareSide);
-        double fxOut = fxMax + coordOff;
-        double fyOut = fyMax + coordOff;
-        return new HoloBioCompensationAlgorithms.CompensationResult(squareOut, fxOut, fyOut);
+
+        // Place the square back into the full hologram frame (centred), matching RT letterbox.
+        // Empty margins use unit amplitude / zero phase → mid-grey on the cyclic phase map
+        // (not black zeros from a top-left paste into the pad canvas).
+        HoloBioCompensationAlgorithms.ComplexField full =
+                embedSquareInFull(squareOut, width, height, sc.x0, sc.y0);
+
+        double fxOut = fxMax + coordOff + sc.x0;
+        double fyOut = fyMax + coordOff + sc.y0;
+        return new HoloBioCompensationAlgorithms.CompensationResult(full, fxOut, fyOut);
     }
 
-    /** Zero-pad a side×side hologram into the center of a target×target grid (target ≥ side). */
+    /**
+     * Paste a square field into a full W×H canvas. Prefer the crop origin from
+     * {@link #cropToSquare}; fall back to centering when offsets are unknown.
+     */
+    private static HoloBioCompensationAlgorithms.ComplexField embedSquareInFull(
+            HoloBioCompensationAlgorithms.ComplexField square,
+            int fullW, int fullH, int x0, int y0) {
+        int sw = square.width, sh = square.height;
+        if (sw == fullW && sh == fullH) {
+            return square;
+        }
+        HoloBioCompensationAlgorithms.ComplexField full =
+                new HoloBioCompensationAlgorithms.ComplexField(fullW, fullH);
+        // Empty margins: 0+0i → amp letterbox black; atan2(0,0)=0 → phase mid-grey
+        java.util.Arrays.fill(full.re, 0.0);
+        java.util.Arrays.fill(full.im, 0.0);
+        if (x0 < 0 || y0 < 0) {
+            x0 = Math.max(0, (fullW - sw) / 2);
+            y0 = Math.max(0, (fullH - sh) / 2);
+        }
+        for (int y = 0; y < sh; y++) {
+            int dy = y0 + y;
+            if (dy < 0 || dy >= fullH) continue;
+            for (int x = 0; x < sw; x++) {
+                int dx = x0 + x;
+                if (dx < 0 || dx >= fullW) continue;
+                int si = y * sw + x;
+                int di = dy * fullW + dx;
+                full.re[di] = square.re[si];
+                full.im[di] = square.im[si];
+            }
+        }
+        return full;
+    }
+
+    /** Mean-pad a side×side hologram into the center of a target×target grid (target ≥ side). */
     private static double[] padCenterToSquare(double[] data, int side, int target) {
         int off = (target - side) / 2;
+        double mean = 0.0;
+        for (double v : data) {
+            mean += v;
+        }
+        mean /= Math.max(1, data.length);
         double[] out = new double[target * target];
+        java.util.Arrays.fill(out, mean);
         for (int y = 0; y < side; y++) {
             System.arraycopy(data, y * side, out, (y + off) * target + off, side);
         }
@@ -92,17 +135,21 @@ final class HoloBioVortexLegendre {
         final double[] data;
         final int width;
         final int height;
+        /** Top-left of the square inside the original hologram. */
+        final int x0, y0;
 
-        SquareCrop(double[] data, int width, int height) {
+        SquareCrop(double[] data, int width, int height, int x0, int y0) {
             this.data = data;
             this.width = width;
             this.height = height;
+            this.x0 = x0;
+            this.y0 = y0;
         }
     }
 
     private static SquareCrop cropToSquare(double[] inp, int width, int height) {
         if (width == height) {
-            return new SquareCrop(inp.clone(), width, height);
+            return new SquareCrop(inp.clone(), width, height, 0, 0);
         }
         if (width > height) {
             int diff = width - height;
@@ -112,7 +159,7 @@ final class HoloBioVortexLegendre {
             for (int y = 0; y < side; y++) {
                 System.arraycopy(inp, y * width + lim, out, y * side, side);
             }
-            return new SquareCrop(out, side, side);
+            return new SquareCrop(out, side, side, lim, 0);
         }
         if (height > width) {
             int diff = height - width;
@@ -122,9 +169,9 @@ final class HoloBioVortexLegendre {
             for (int y = 0; y < side; y++) {
                 System.arraycopy(inp, (lim + y) * width, out, y * side, side);
             }
-            return new SquareCrop(out, side, side);
+            return new SquareCrop(out, side, side, 0, lim);
         }
-        return new SquareCrop(inp.clone(), width, height);
+        return new SquareCrop(inp.clone(), width, height, 0, 0);
     }
 
     private static double[] medianFilteredLogSpectrum(HoloBioCompensationAlgorithms.ComplexField holoFilter,
@@ -542,11 +589,12 @@ final class HoloBioVortexLegendre {
             }
         }
         for (int i = 0; i < square.re.length; i++) {
+            double mag = Math.hypot(square.re[i], square.im[i]);
             double phNum = Math.atan2(square.im[i], square.re[i]);
             double c = Math.cos(phNum - wavefront[i]);
             double s = Math.sin(phNum - wavefront[i]);
-            square.re[i] = c;
-            square.im[i] = s;
+            square.re[i] = mag * c;
+            square.im[i] = mag * s;
         }
     }
 
@@ -685,18 +733,19 @@ final class HoloBioVortexLegendre {
             HoloBioCompensationAlgorithms.ComplexField phaseCorrected,
             HoloBioCompensationAlgorithms.ComplexField objVl,
             int rows, int cols) {
-        if (phaseCorrected.height == rows && phaseCorrected.width == cols) {
-            return phaseCorrected;
+        // Always restore object magnitude onto the Legendre phase (even when sizes match).
+        HoloBioCompensationAlgorithms.ComplexField phaseFull = phaseCorrected;
+        if (phaseCorrected.height != rows || phaseCorrected.width != cols) {
+            phaseFull = new HoloBioCompensationAlgorithms.ComplexField(cols, rows);
+            resizeBilinear(phaseCorrected.re, phaseCorrected.im,
+                    phaseCorrected.width, phaseCorrected.height,
+                    phaseFull.re, phaseFull.im, cols, rows);
         }
-        HoloBioCompensationAlgorithms.ComplexField up =
-                new HoloBioCompensationAlgorithms.ComplexField(cols, rows);
-        resizeBilinear(phaseCorrected.re, phaseCorrected.im, phaseCorrected.width, phaseCorrected.height,
-                up.re, up.im, cols, rows);
         HoloBioCompensationAlgorithms.ComplexField out =
                 new HoloBioCompensationAlgorithms.ComplexField(cols, rows);
         for (int i = 0; i < out.re.length; i++) {
             double mag = Math.hypot(objVl.re[i], objVl.im[i]);
-            double ph = Math.atan2(up.im[i], up.re[i]);
+            double ph = Math.atan2(phaseFull.im[i], phaseFull.re[i]);
             out.re[i] = mag * Math.cos(ph);
             out.im[i] = mag * Math.sin(ph);
         }

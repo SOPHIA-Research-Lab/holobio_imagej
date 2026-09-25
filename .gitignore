@@ -18,5 +18,17 @@ Thumbs.db
 NumericalPropagation*/
 jython/
 
-# Large parity test binaries
-tools/parity_workspace/*.f32
+# Generated parity / benchmark fixtures (~6 MB, reproducible by running the
+# harnesses in bench/ and tools/ — the scripts are tracked, their output is not)
+tools/parity_workspace/
+bench/*.png
+bench/dlhm_parity/
+
+# Local scratch / compiled harness output
+bench/classes/
+bench/out/
+bench/rec-classes/
+fft5tmp/
+*.orig
+src/*.py
+HoloBio_DLHM_Plugin.appended-snippet.txt

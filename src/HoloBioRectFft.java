@@ -106,8 +106,6 @@ public final class HoloBioRectFft {
 
     public static void fft2dForward(float[] re, float[] im, int rows, int cols) {
 
-        requirePow2(rows, cols);
-
         fftRows(re, im, rows, cols, false);
 
         fftCols(re, im, rows, cols, false);
@@ -117,8 +115,6 @@ public final class HoloBioRectFft {
 
 
     public static void fft2dForward(double[] re, double[] im, int rows, int cols) {
-
-        requirePow2(rows, cols);
 
         fftRows(re, im, rows, cols, false);
 
@@ -137,8 +133,6 @@ public final class HoloBioRectFft {
      */
 
     public static void ifft2d(float[] re, float[] im, int rows, int cols) {
-
-        requirePow2(rows, cols);
 
         fftRows(re, im, rows, cols, true);
 
@@ -159,8 +153,6 @@ public final class HoloBioRectFft {
 
 
     public static void ifft2d(double[] re, double[] im, int rows, int cols) {
-
-        requirePow2(rows, cols);
 
         fftRows(re, im, rows, cols, true);
 
@@ -257,70 +249,42 @@ public final class HoloBioRectFft {
   /** Numpy {@code fftshift} / {@code ifftshift} along one axis of a row-major 2D array. */
 
     private static void shiftAxis(float[] re, float[] im, int rows, int cols, boolean alongRows, boolean inverse) {
-
-        int len = alongRows ? rows : cols;
-
-        int p2 = inverse ? len - (len + 1) / 2 : (len + 1) / 2;
-
-        float[] tmpRe = new float[len];
-
-        float[] tmpIm = new float[len];
-
+        final int len = alongRows ? rows : cols;
+        final int p2 = inverse ? len - (len + 1) / 2 : (len + 1) / 2;
         if (alongRows) {
-
-            for (int x = 0; x < cols; x++) {
-
-                for (int y = 0; y < len; y++) {
-
-                    int src = (y + p2) % len;
-
-                    int si = src * cols + x;
-
-                    tmpRe[y] = re[si];
-
-                    tmpIm[y] = im[si];
-
+            HoloBioParallel.forEachLine(cols, (from, to) -> {
+                float[] tmpRe = new float[len];
+                float[] tmpIm = new float[len];
+                for (int x = from; x < to; x++) {
+                    for (int y = 0; y < len; y++) {
+                        int si = ((y + p2) % len) * cols + x;
+                        tmpRe[y] = re[si];
+                        tmpIm[y] = im[si];
+                    }
+                    for (int y = 0; y < len; y++) {
+                        int di = y * cols + x;
+                        re[di] = tmpRe[y];
+                        im[di] = tmpIm[y];
+                    }
                 }
-
-                for (int y = 0; y < len; y++) {
-
-                    int di = y * cols + x;
-
-                    re[di] = tmpRe[y];
-
-                    im[di] = tmpIm[y];
-
-                }
-
-            }
-
+            });
         } else {
-
-            for (int y = 0; y < rows; y++) {
-
-                int base = y * cols;
-
-                for (int x = 0; x < len; x++) {
-
-                    int src = (x + p2) % len;
-
-                    tmpRe[x] = re[base + src];
-
-                    tmpIm[x] = im[base + src];
-
+            HoloBioParallel.forEachLine(rows, (from, to) -> {
+                float[] tmpRe = new float[len];
+                float[] tmpIm = new float[len];
+                for (int y = from; y < to; y++) {
+                    int base = y * cols;
+                    for (int x = 0; x < len; x++) {
+                        int src = (x + p2) % len;
+                        tmpRe[x] = re[base + src];
+                        tmpIm[x] = im[base + src];
+                    }
+                    System.arraycopy(tmpRe, 0, re, base, len);
+                    System.arraycopy(tmpIm, 0, im, base, len);
                 }
-
-                System.arraycopy(tmpRe, 0, re, base, len);
-
-                System.arraycopy(tmpIm, 0, im, base, len);
-
-            }
-
+            });
         }
-
     }
-
-
 
     private static void shiftAxis(double[] re, double[] im, int rows, int cols, boolean alongRows, boolean inverse) {
 
@@ -441,128 +405,74 @@ public final class HoloBioRectFft {
 
 
     private static void fftRows(float[] re, float[] im, int rows, int cols, boolean inverse) {
-
-        float[] bufRe = new float[cols];
-
-        float[] bufIm = new float[cols];
-
-        for (int y = 0; y < rows; y++) {
-
-            int base = y * cols;
-
-            System.arraycopy(re, base, bufRe, 0, cols);
-
-            System.arraycopy(im, base, bufIm, 0, cols);
-
-            fftRadix2InPlace(bufRe, bufIm, inverse);
-
-            System.arraycopy(bufRe, 0, re, base, cols);
-
-            System.arraycopy(bufIm, 0, im, base, cols);
-
-        }
-
+        HoloBioParallel.forEachLine(rows, (from, to) -> {
+            float[] bufRe = new float[cols];
+            float[] bufIm = new float[cols];
+            for (int y = from; y < to; y++) {
+                int base = y * cols;
+                System.arraycopy(re, base, bufRe, 0, cols);
+                System.arraycopy(im, base, bufIm, 0, cols);
+                fft1d(bufRe, bufIm, inverse);
+                System.arraycopy(bufRe, 0, re, base, cols);
+                System.arraycopy(bufIm, 0, im, base, cols);
+            }
+        });
     }
-
-
 
     private static void fftCols(float[] re, float[] im, int rows, int cols, boolean inverse) {
-
-        float[] bufRe = new float[rows];
-
-        float[] bufIm = new float[rows];
-
-        for (int x = 0; x < cols; x++) {
-
-            for (int y = 0; y < rows; y++) {
-
-                int idx = y * cols + x;
-
-                bufRe[y] = re[idx];
-
-                bufIm[y] = im[idx];
-
+        HoloBioParallel.forEachLine(cols, (from, to) -> {
+            float[] bufRe = new float[rows];
+            float[] bufIm = new float[rows];
+            for (int x = from; x < to; x++) {
+                for (int y = 0; y < rows; y++) {
+                    int idx = y * cols + x;
+                    bufRe[y] = re[idx];
+                    bufIm[y] = im[idx];
+                }
+                fft1d(bufRe, bufIm, inverse);
+                for (int y = 0; y < rows; y++) {
+                    int idx = y * cols + x;
+                    re[idx] = bufRe[y];
+                    im[idx] = bufIm[y];
+                }
             }
-
-            fftRadix2InPlace(bufRe, bufIm, inverse);
-
-            for (int y = 0; y < rows; y++) {
-
-                int idx = y * cols + x;
-
-                re[idx] = bufRe[y];
-
-                im[idx] = bufIm[y];
-
-            }
-
-        }
-
+        });
     }
-
-
 
     private static void fftRows(double[] re, double[] im, int rows, int cols, boolean inverse) {
-
-        double[] bufRe = new double[cols];
-
-        double[] bufIm = new double[cols];
-
-        for (int y = 0; y < rows; y++) {
-
-            int base = y * cols;
-
-            System.arraycopy(re, base, bufRe, 0, cols);
-
-            System.arraycopy(im, base, bufIm, 0, cols);
-
-            fftRadix2InPlace(bufRe, bufIm, inverse);
-
-            System.arraycopy(bufRe, 0, re, base, cols);
-
-            System.arraycopy(bufIm, 0, im, base, cols);
-
-        }
-
+        HoloBioParallel.forEachLine(rows, (from, to) -> {
+            double[] bufRe = new double[cols];
+            double[] bufIm = new double[cols];
+            for (int y = from; y < to; y++) {
+                int base = y * cols;
+                System.arraycopy(re, base, bufRe, 0, cols);
+                System.arraycopy(im, base, bufIm, 0, cols);
+                fft1d(bufRe, bufIm, inverse);
+                System.arraycopy(bufRe, 0, re, base, cols);
+                System.arraycopy(bufIm, 0, im, base, cols);
+            }
+        });
     }
-
-
 
     private static void fftCols(double[] re, double[] im, int rows, int cols, boolean inverse) {
-
-        double[] bufRe = new double[rows];
-
-        double[] bufIm = new double[rows];
-
-        for (int x = 0; x < cols; x++) {
-
-            for (int y = 0; y < rows; y++) {
-
-                int idx = y * cols + x;
-
-                bufRe[y] = re[idx];
-
-                bufIm[y] = im[idx];
-
+        HoloBioParallel.forEachLine(cols, (from, to) -> {
+            double[] bufRe = new double[rows];
+            double[] bufIm = new double[rows];
+            for (int x = from; x < to; x++) {
+                for (int y = 0; y < rows; y++) {
+                    int idx = y * cols + x;
+                    bufRe[y] = re[idx];
+                    bufIm[y] = im[idx];
+                }
+                fft1d(bufRe, bufIm, inverse);
+                for (int y = 0; y < rows; y++) {
+                    int idx = y * cols + x;
+                    re[idx] = bufRe[y];
+                    im[idx] = bufIm[y];
+                }
             }
-
-            fftRadix2InPlace(bufRe, bufIm, inverse);
-
-            for (int y = 0; y < rows; y++) {
-
-                int idx = y * cols + x;
-
-                re[idx] = bufRe[y];
-
-                im[idx] = bufIm[y];
-
-            }
-
-        }
-
+        });
     }
-
-
 
     private static void swap(float[] re, float[] im, int i, int j) {
 
@@ -601,6 +511,121 @@ public final class HoloBioRectFft {
 
 
     /** 1D radix-2 FFT; inverse passes do not scale (2D ifft2d applies 1/(M·N) once). */
+
+    // ---------------------------------------------------------------------
+    // Arbitrary-length transforms (Bluestein)
+    // ---------------------------------------------------------------------
+    // numpy transforms at the frame's native size. Zero- or mean-padding up to a power
+    // of two is NOT equivalent — the padded border convolves into the spectrum and
+    // visibly corrupts the reconstruction (measured ~9% peak amplitude error on a
+    // 320x240 frame). Bluestein expresses a length-n DFT as a convolution of length
+    // m >= 2n-1, which can be a power of two, so any n is exact.
+
+    /** Chirp tables for one (n, direction); rebuilt only when the pass length changes. */
+    private static final class Chirp {
+        final int n;
+        final int m;
+        final boolean inverse;
+        final double[] cos;
+        final double[] sin;
+        final double[] bRe;
+        final double[] bIm;
+
+        Chirp(int n, boolean inverse) {
+            this.n = n;
+            this.inverse = inverse;
+            this.m = nextPowerOfTwo(2 * n + 1);
+            this.cos = new double[n];
+            this.sin = new double[n];
+            double sign = inverse ? 1.0 : -1.0;
+            for (int i = 0; i < n; i++) {
+                // exp(i*pi*k^2/n) repeats every 2n in k^2, so reducing first keeps the
+                // angle small: k*k overflows and loses precision for large n otherwise.
+                long k2 = (long) i * i % (2L * n);
+                double ang = sign * Math.PI * k2 / n;
+                cos[i] = Math.cos(ang);
+                sin[i] = Math.sin(ang);
+            }
+            this.bRe = new double[m];
+            this.bIm = new double[m];
+            bRe[0] = cos[0];
+            bIm[0] = -sin[0];
+            for (int i = 1; i < n; i++) {
+                bRe[i] = bRe[m - i] = cos[i];
+                bIm[i] = bIm[m - i] = -sin[i];
+            }
+            fftRadix2InPlace(bRe, bIm, false);
+        }
+    }
+
+    /** Single-entry cache: every line in a pass shares the same length and direction. */
+    private static volatile Chirp chirpCache;
+
+    private static Chirp chirpFor(int n, boolean inverse) {
+        Chirp c = chirpCache;
+        if (c != null && c.n == n && c.inverse == inverse) {
+            return c;
+        }
+        Chirp built = new Chirp(n, inverse);
+        chirpCache = built;   // benign race: two threads may build the same tables
+        return built;
+    }
+
+    /** Unscaled DFT of any length, matching {@link #fftRadix2InPlace}'s conventions. */
+    private static void bluestein(double[] re, double[] im, boolean inverse) {
+        int n = re.length;
+        Chirp c = chirpFor(n, inverse);
+        int m = c.m;
+
+        double[] ar = new double[m];
+        double[] ai = new double[m];
+        for (int i = 0; i < n; i++) {
+            ar[i] = re[i] * c.cos[i] - im[i] * c.sin[i];
+            ai[i] = re[i] * c.sin[i] + im[i] * c.cos[i];
+        }
+        fftRadix2InPlace(ar, ai, false);
+        for (int i = 0; i < m; i++) {
+            double t = ar[i] * c.bRe[i] - ai[i] * c.bIm[i];
+            ai[i] = ar[i] * c.bIm[i] + ai[i] * c.bRe[i];
+            ar[i] = t;
+        }
+        fftRadix2InPlace(ar, ai, true);   // radix-2 inverse leaves scaling to the caller
+        double inv = 1.0 / m;
+        for (int i = 0; i < n; i++) {
+            double cr = ar[i] * inv;
+            double ci = ai[i] * inv;
+            re[i] = cr * c.cos[i] - ci * c.sin[i];
+            im[i] = cr * c.sin[i] + ci * c.cos[i];
+        }
+    }
+
+    /** Radix-2 when the length allows it, Bluestein otherwise. */
+    private static void fft1d(double[] re, double[] im, boolean inverse) {
+        if (isPowerOfTwo(re.length)) {
+            fftRadix2InPlace(re, im, inverse);
+        } else {
+            bluestein(re, im, inverse);
+        }
+    }
+
+    private static void fft1d(float[] re, float[] im, boolean inverse) {
+        int n = re.length;
+        if (isPowerOfTwo(n)) {
+            fftRadix2InPlace(re, im, inverse);
+            return;
+        }
+        double[] dr = new double[n];
+        double[] di = new double[n];
+        for (int i = 0; i < n; i++) {
+            dr[i] = re[i];
+            di[i] = im[i];
+        }
+        bluestein(dr, di, inverse);
+        for (int i = 0; i < n; i++) {
+            re[i] = (float) dr[i];
+            im[i] = (float) di[i];
+        }
+    }
 
     private static void fftRadix2InPlace(float[] re, float[] im, boolean inverse) {
 

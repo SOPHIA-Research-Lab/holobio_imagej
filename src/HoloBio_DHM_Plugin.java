@@ -16,15 +16,14 @@ import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JCheckBox;
+import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
-import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
-import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
@@ -47,9 +46,9 @@ import java.util.List;
 
 public class HoloBio_DHM_Plugin implements PlugIn {
     private static final int FIELD_COLS = 5;
-    private static final int FORM_LABEL_W = 158;
-    private static final int FORM_FIELD_W = 120;
-    private static final int FORM_COMBO_W = 120;
+    private static final int FORM_LABEL_W = HoloBioUiStyle.FORM_LABEL_W;
+    private static final int FORM_FIELD_W = HoloBioUiStyle.FORM_FIELD_W;
+    private static final int FORM_COMBO_W = HoloBioUiStyle.FORM_COMBO_W;
 
     private final HoloBioDhmState state = new HoloBioDhmState();
     private final HoloBioDhmParams params = new HoloBioDhmParams();
@@ -122,7 +121,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private JRadioButton rbModulePhaseShift;
     private JRadioButton rbModuleNumericalProp;
     private JPanel moduleCards;
-    private JTextArea debugLogArea;
+    private JButton btnCompensate;
+    private JButton btnApply;
     private int srcWidth;
     private int srcHeight;
     private int padSize;
@@ -141,58 +141,57 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void createAndShowGUI() {
-        HoloBioFijiUi.setMessageSink(this::debugLog);
-        JFrame frame = new JFrame("HoloBio DHM Plugin");
+        JFrame frame = new JFrame("HoloBio — Offline DHM");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        frame.setLayout(new BorderLayout(6, 6));
+        frame.setLayout(new BorderLayout(0, 0));
 
         frame.add(buildTopBar(), BorderLayout.NORTH);
         frame.add(buildCenterPanel(), BorderLayout.CENTER);
         frame.add(buildBottomBar(), BorderLayout.SOUTH);
 
-        frame.pack();
-        HoloBioUiStyle.applyPluginTypography(frame);
-        frame.setMinimumSize(new Dimension(520, 560));
-        if (frame.getWidth() < 540 || frame.getHeight() < 620) {
-            frame.setSize(new Dimension(560, 620));
-        }
+        HoloBioUiStyle.polish(frame);
+        HoloBioUiStyle.packTight(frame, 0, 500, 720);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
     }
 
     private JPanel buildTopBar() {
-        JPanel topBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 5));
-        JButton useActiveButton = new JButton("Use Active Image");
+        JButton useActiveButton = HoloBioUiStyle.secondaryButton("Use Active Image");
+        useActiveButton.setToolTipText("Link the front-most Fiji image as the hologram.");
         useActiveButton.addActionListener(e -> onUseActiveImage());
 
-        JComboBox<String> toolsMenu = new JComboBox<>(new String[] {"Tools", "Speckle"});
+        JComboBox<String> toolsMenu = new JComboBox<>(new String[] {"Analysis tools", "Speckle", "QPI"});
+        toolsMenu.setToolTipText("Open Speckle or QPI on the current reconstruction.");
+        HoloBioUiStyle.styleField(toolsMenu);
+        HoloBioUiStyle.sizeField(toolsMenu, 120);
         toolsMenu.addActionListener(e -> {
             String option = (String) toolsMenu.getSelectedItem();
-            if (option != null) {
+            if (option != null && !"Analysis tools".equals(option)) {
                 _on_tools_select(option);
+                toolsMenu.setSelectedIndex(0);
             }
         });
 
-        topBar.add(useActiveButton);
-        topBar.add(toolsMenu);
-        topBar.add(Box.createHorizontalStrut(12));
-        topBar.add(HoloBioUiStyle.mainTitle("HoloBio DHM Offline"));
-        return topBar;
+        return HoloBioUiStyle.buildHeader(
+            "Offline DHM",
+            null,
+            null,
+            useActiveButton, toolsMenu);
     }
 
     private JPanel buildCenterPanel() {
         JPanel center = new JPanel(new BorderLayout(0, 0));
         JPanel left = buildParametersPanel();
-        left.setPreferredSize(new Dimension(430, 0));
         center.add(left, BorderLayout.CENTER);
         return center;
     }
 
     private JPanel buildParametersPanel() {
-        JPanel left = new JPanel(new BorderLayout(4, 4));
-        left.setBorder(HoloBioUiStyle.sectionBorder("Processing Submodules"));
+        JPanel left = new JPanel(new BorderLayout(0, HoloBioUiStyle.SPACE_1));
+        left.setBorder(HoloBioUiStyle.contentPad());
 
-        JPanel methodSelector = new JPanel(new GridLayout(3, 1, 2, 2));
+        JPanel methodSelector = new JPanel(new BorderLayout());
+        methodSelector.setBorder(HoloBioUiStyle.sectionPad("Submodule"));
         rbModulePhaseComp = new JRadioButton("Phase Compensation", true);
         rbModulePhaseShift = new JRadioButton("Phase Shifting", false);
         rbModuleNumericalProp = new JRadioButton("Numerical Propagation", false);
@@ -200,42 +199,18 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         moduleGroup.add(rbModulePhaseComp);
         moduleGroup.add(rbModulePhaseShift);
         moduleGroup.add(rbModuleNumericalProp);
-        methodSelector.add(rbModulePhaseComp);
-        methodSelector.add(rbModulePhaseShift);
-        methodSelector.add(rbModuleNumericalProp);
+        methodSelector.add(HoloBioUiStyle.choiceGrid(2,
+            rbModulePhaseComp, rbModulePhaseShift,
+            rbModuleNumericalProp, null), BorderLayout.WEST);
 
-        JPanel logPanel = new JPanel(new BorderLayout(4, 4));
-        logPanel.setBorder(HoloBioUiStyle.sectionBorder("Debug Log"));
-        debugLogArea = new JTextArea(6, 26);
-        debugLogArea.setEditable(false);
-        debugLogArea.setLineWrap(true);
-        debugLogArea.setWrapStyleWord(true);
-        JScrollPane logScroll = new JScrollPane(debugLogArea,
-            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        logPanel.add(logScroll, BorderLayout.CENTER);
+        left.add(methodSelector, BorderLayout.NORTH);
 
-        JPanel headerRow = new JPanel(new BorderLayout(6, 0));
-        headerRow.add(methodSelector, BorderLayout.CENTER);
-        headerRow.add(logPanel, BorderLayout.EAST);
-        left.add(headerRow, BorderLayout.NORTH);
-
-        moduleCards = new JPanel(new CardLayout());
-        JScrollPane pcScroll = new JScrollPane(init_phase_compensation_frame(),
-            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        JScrollPane psScroll = new JScrollPane(init_phase_shifting_frame(),
-            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        JScrollPane npScroll = new JScrollPane(init_numerical_propagation_frame(),
-            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        pcScroll.setBorder(null);
-        psScroll.setBorder(null);
-        npScroll.setBorder(null);
-        pcScroll.getVerticalScrollBar().setUnitIncrement(16);
-        psScroll.getVerticalScrollBar().setUnitIncrement(16);
-        npScroll.getVerticalScrollBar().setUnitIncrement(16);
-        moduleCards.add(pcScroll, "PHASE_COMP");
-        moduleCards.add(psScroll, "PHASE_SHIFT");
-        moduleCards.add(npScroll, "NUM_PROP");
-        left.add(moduleCards, BorderLayout.CENTER);
+        CardLayout moduleLayout = new CardLayout();
+        moduleCards = HoloBioUiStyle.huggingCardPanel(moduleLayout);
+        moduleCards.add(init_phase_compensation_frame(), "PHASE_COMP");
+        moduleCards.add(init_phase_shifting_frame(), "PHASE_SHIFT");
+        moduleCards.add(init_numerical_propagation_frame(), "NUM_PROP");
+        left.add(HoloBioUiStyle.hugNorth(moduleCards), BorderLayout.CENTER);
 
         rbModulePhaseComp.addActionListener(e -> showModuleCard("PHASE_COMP"));
         rbModulePhaseShift.addActionListener(e -> showModuleCard("PHASE_SHIFT"));
@@ -246,8 +221,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private void showModuleCard(String name) {
         CardLayout layout = (CardLayout) moduleCards.getLayout();
         layout.show(moduleCards, name);
-        debugLog("Module selected: " + moduleNameFromCard(name));
-        debugLogSelectionSnapshot("After module switch");
+        moduleCards.revalidate();
+        java.awt.Window w = SwingUtilities.getWindowAncestor(moduleCards);
+        if (w != null) {
+            HoloBioUiStyle.packTight(w, 0, 500, 720);
+        }
     }
 
     private String moduleNameFromCard(String name) {
@@ -269,53 +247,39 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void setFixedControlSize(Component control, int w) {
-        Dimension d = new Dimension(w, 28);
-        control.setPreferredSize(d);
+        HoloBioUiStyle.setControlSize(control, w);
     }
 
     private JPanel compactRow(String labelText, Component input) {
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
-        JLabel label = new JLabel(labelText);
-        label.setPreferredSize(new Dimension(FORM_LABEL_W, 22));
+        if (input instanceof JComponent) {
+            return HoloBioUiStyle.formRow(labelText, (JComponent) input, FORM_LABEL_W);
+        }
+        JPanel row = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_1);
+        JLabel label = HoloBioUiStyle.fieldLabel(labelText);
+        label.setPreferredSize(new Dimension(FORM_LABEL_W, HoloBioUiStyle.CONTROL_H));
         row.add(label);
         row.add(input);
-        row.setAlignmentX(Component.LEFT_ALIGNMENT);
-        row.setMaximumSize(new Dimension(FORM_LABEL_W + FORM_COMBO_W + 28, 34));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, HoloBioUiStyle.CONTROL_H + HoloBioUiStyle.SPACE_2));
         return row;
     }
 
     private JPanel compactInfoRow(String labelText, String valueText) {
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
-        JLabel label = new JLabel(labelText);
-        JLabel value = new JLabel(valueText);
-        label.setPreferredSize(new Dimension(FORM_LABEL_W, 22));
+        JPanel row = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_1);
+        JLabel label = HoloBioUiStyle.fieldLabel(labelText);
+        JLabel value = HoloBioUiStyle.footerNote(valueText);
+        label.setPreferredSize(new Dimension(FORM_LABEL_W, HoloBioUiStyle.CONTROL_H));
         row.add(label);
         row.add(value);
-        row.setAlignmentX(Component.LEFT_ALIGNMENT);
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, HoloBioUiStyle.CONTROL_H + HoloBioUiStyle.SPACE_2));
         return row;
     }
 
-    private JPanel miniParamCell(String labelText, JTextField field) {
-        JPanel cell = new JPanel();
-        cell.setLayout(new BoxLayout(cell, BoxLayout.Y_AXIS));
-        JLabel label = new JLabel(labelText);
-        label.setAlignmentX(Component.LEFT_ALIGNMENT);
-        field.setAlignmentX(Component.LEFT_ALIGNMENT);
-        cell.add(label);
-        cell.add(Box.createVerticalStrut(4));
-        cell.add(field);
-        cell.setAlignmentX(Component.LEFT_ALIGNMENT);
-        return cell;
-    }
-
     private JPanel init_phase_compensation_frame() {
-        JPanel panel = new JPanel(new BorderLayout(6, 6));
-        panel.setBorder(HoloBioUiStyle.sectionBorder("Phase Compensation"));
+        JPanel panel = new JPanel(new BorderLayout(0, HoloBioUiStyle.SPACE_1));
+        panel.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_1, 0, 0, 0));
 
         JPanel content = new JPanel();
         content.setLayout(new GridBagLayout());
-        content.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         content.setAlignmentX(Component.LEFT_ALIGNMENT);
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.gridx = 0;
@@ -323,12 +287,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         gbc.weightx = 1.0;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(0, 0, 8, 0);
+        gbc.insets = new Insets(0, 0, HoloBioUiStyle.SPACE_1, 0);
 
-        JPanel methodPanel = new JPanel(new BorderLayout(4, 4));
-        methodPanel.setBorder(HoloBioUiStyle.sectionBorder("Choose a Compensation Method"));
+        JPanel methodPanel = new JPanel(new BorderLayout());
+        methodPanel.setBorder(HoloBioUiStyle.sectionPad("Method"));
         methodPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        JPanel methodGrid = new JPanel(new GridLayout(1, 3, 6, 6));
         rbPcMethodSemi = new JRadioButton("Semi-Heuristic", true);
         rbPcMethodTu = new JRadioButton("Tu-DHM");
         rbPcMethodVl = new JRadioButton("Vortex Legendre");
@@ -336,72 +299,61 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         pcMethodGroup.add(rbPcMethodSemi);
         pcMethodGroup.add(rbPcMethodTu);
         pcMethodGroup.add(rbPcMethodVl);
-        methodGrid.add(rbPcMethodSemi);
-        methodGrid.add(rbPcMethodTu);
-        methodGrid.add(rbPcMethodVl);
-        JButton openSettingsButton = new JButton("Settings");
-        openSettingsButton.addActionListener(e -> open_compensation_settings());
-        setFixedControlSize(openSettingsButton, 110);
-        JPanel settingsBtnWrap = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 2));
-        settingsBtnWrap.add(openSettingsButton);
-        methodPanel.add(methodGrid, BorderLayout.NORTH);
-        methodPanel.add(settingsBtnWrap, BorderLayout.SOUTH);
+        JButton openSettingsButton = HoloBioUiStyle.gearButton(
+            "Search size, grid, and Vortex–Legendre options.",
+            e -> open_compensation_settings());
+        methodPanel.add(HoloBioUiStyle.choiceGrid(2,
+            HoloBioUiStyle.radioWithInfo(rbPcMethodSemi, "Semi-Heuristic",
+                "ERS search that recentres the first-order carrier in the Fourier plane."),
+            HoloBioUiStyle.radioWithInfo(rbPcMethodTu, "Tu-DHM",
+                "CFS / Tu-DHM coarse-to-fine search for the first-order spectrum."),
+            HoloBioUiStyle.radioWithInfo(rbPcMethodVl, "Vortex Legendre",
+                "Vortex extraction plus Legendre polynomial flattening of residual tilt and curvature."),
+            openSettingsButton), BorderLayout.WEST);
         content.add(methodPanel, gbc);
         gbc.gridy++;
 
-        JPanel paramsPanel = new JPanel();
-        paramsPanel.setLayout(new BoxLayout(paramsPanel, BoxLayout.Y_AXIS));
-        paramsPanel.setBorder(HoloBioUiStyle.sectionBorder("Loading Reconstruction Parameters"));
-        paramsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        tfPcLambda = new JTextField("", FIELD_COLS);
-        tfPcPitchX = new JTextField("", FIELD_COLS);
-        tfPcPitchY = new JTextField("", FIELD_COLS);
-        setFixedControlSize(tfPcLambda, FORM_FIELD_W);
-        setFixedControlSize(tfPcPitchX, FORM_FIELD_W);
-        setFixedControlSize(tfPcPitchY, FORM_FIELD_W);
-        JPanel pcRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 2));
-        pcRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        pcRow.add(miniParamCell("Wavelength (um)", tfPcLambda));
-        pcRow.add(miniParamCell("Pitch X (um)", tfPcPitchX));
-        pcRow.add(miniParamCell("Pitch Y (um)", tfPcPitchY));
-        paramsPanel.add(pcRow);
+        JPanel paramsPanel = HoloBioUiStyle.formSection("Physical parameters");
+        GridBagConstraints pcC = HoloBioUiStyle.formGbc();
+        tfPcLambda = new JTextField("0.633", FIELD_COLS);
+        tfPcPitchX = new JTextField("3.75", FIELD_COLS);
+        tfPcPitchY = new JTextField("3.75", FIELD_COLS);
+        tfPcLambda.setToolTipText("Illumination wavelength in micrometres, e.g. 0.633.");
+        String pitchTip = "<html>Camera <b>sensor</b> pixel size (µm), same as RT DHM.<br>"
+                + "Do <b>not</b> divide by magnification M (e.g. use 3.75, not 3.75/40).<br>"
+                + "Set M under Propagation for object-plane scaling.</html>";
+        tfPcPitchX.setToolTipText(pitchTip);
+        tfPcPitchY.setToolTipText(pitchTip);
+        HoloBioUiStyle.addLabelField(paramsPanel, pcC, "Wavelength (µm)", tfPcLambda);
+        HoloBioUiStyle.addLabelField(paramsPanel, pcC, "Sensor pitch X (µm)", tfPcPitchX);
+        HoloBioUiStyle.addLabelField(paramsPanel, pcC, "Sensor pitch Y (µm)", tfPcPitchY);
         content.add(paramsPanel, gbc);
         gbc.gridy++;
 
-        JPanel filterPanel = new JPanel(new BorderLayout(4, 4));
-        filterPanel.setBorder(HoloBioUiStyle.sectionBorder("Compensation Filter Options"));
-        filterPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        JLabel filterFixedLabel = new JLabel("Automatic / Rectangle (fixed)");
-        filterFixedLabel.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-        filterPanel.add(filterFixedLabel, BorderLayout.CENTER);
-        content.add(filterPanel, gbc);
-        gbc.gridy++;
-
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        JButton compensateButton = new JButton("Compensate");
-        compensateButton.addActionListener(e -> run_phase_compensation());
-        actions.add(compensateButton);
+        JPanel actions = HoloBioUiStyle.flowLeft();
+        btnCompensate = HoloBioUiStyle.primaryButton("Compensate");
+        btnCompensate.setToolTipText("Run the selected compensation method on the linked hologram.");
+        btnCompensate.addActionListener(e ->
+            HoloBioUiStyle.runBusy(btnCompensate, "Working…", this::run_phase_compensation));
+        actions.add(btnCompensate);
         content.add(actions, gbc);
         gbc.gridy++;
         gbc.insets = new Insets(0, 0, 0, 0);
 
-        rbPcMethodSemi.addActionListener(e -> debugLog("Compensation method selected: ERS"));
-        rbPcMethodTu.addActionListener(e -> debugLog("Compensation method selected: CFS"));
-        rbPcMethodVl.addActionListener(e -> debugLog("Compensation method selected: Vortex-Legendre"));
-
         propOptionsPc = new PropagationUi();
-        panel.add(content, BorderLayout.CENTER);
+        panel.add(content, BorderLayout.NORTH);
         panel.add(propOptionsPc.root, BorderLayout.SOUTH);
         return panel;
     }
 
     private JPanel init_phase_shifting_frame() {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.setBorder(HoloBioUiStyle.sectionBorder("Phase Shifting"));
+        JPanel panel = new JPanel(new BorderLayout(0, HoloBioUiStyle.SPACE_1));
+        panel.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_1, 0, 0, 0));
 
         JPanel form = new JPanel();
         form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
-        form.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
+        form.setBorder(HoloBioUiStyle.emptyPad(
+            HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_1));
 
         JPanel methodRow = new JPanel();
         methodRow.setLayout(new BoxLayout(methodRow, BoxLayout.Y_AXIS));
@@ -416,7 +368,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
         JPanel psParams = new JPanel();
         psParams.setLayout(new BoxLayout(psParams, BoxLayout.Y_AXIS));
-        psParams.setBorder(HoloBioUiStyle.sectionBorder("Physical parameters (phase shifting)"));
+        psParams.setBorder(HoloBioUiStyle.sectionPad("Physical parameters"));
         psParams.setAlignmentX(Component.LEFT_ALIGNMENT);
         tfPsLambda = new JTextField("0.532", FIELD_COLS);
         tfPsPitchX = new JTextField("2.40", FIELD_COLS);
@@ -424,16 +376,20 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         setFixedControlSize(tfPsLambda, FORM_FIELD_W);
         setFixedControlSize(tfPsPitchX, FORM_FIELD_W);
         setFixedControlSize(tfPsPitchY, FORM_FIELD_W);
-        psParams.add(compactRow("Wavelength (um):", tfPsLambda));
-        psParams.add(compactRow("Pitch X (um):", tfPsPitchX));
-        psParams.add(compactRow("Pitch Y (um):", tfPsPitchY));
+        HoloBioUiStyle.styleField(tfPsLambda);
+        HoloBioUiStyle.styleField(tfPsPitchX);
+        HoloBioUiStyle.styleField(tfPsPitchY);
+        tfPsLambda.setToolTipText("Illumination wavelength in micrometres, e.g. 0.532.");
+        tfPsPitchX.setToolTipText("Sensor pixel pitch X in micrometres.");
+        tfPsPitchY.setToolTipText("Sensor pixel pitch Y in micrometres.");
+        psParams.add(compactRow("Wavelength (µm):", tfPsLambda));
+        psParams.add(compactRow("Pitch X (µm):", tfPsPitchX));
+        psParams.add(compactRow("Pitch Y (µm):", tfPsPitchY));
         form.add(psParams);
 
         cbPsAutoPropagate = new JCheckBox("Auto-propagate after phase shifting", false);
         cbPsAutoPropagate.setToolTipText("Disable for strict parity checks against Python phase-shifting output.");
         cbPsAutoPropagate.setAlignmentX(Component.LEFT_ALIGNMENT);
-        cbPsAutoPropagate.addActionListener(e ->
-            debugLog("Phase shifting auto-propagate: " + cbPsAutoPropagate.isSelected()));
         form.add(cbPsAutoPropagate);
 
         propOptionsPs = new PropagationUi();
@@ -447,33 +403,41 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private JPanel init_numerical_propagation_frame() {
-        JPanel panel = new JPanel(new BorderLayout(6, 6));
-        panel.setBorder(HoloBioUiStyle.sectionBorder("Numerical Propagation"));
+        JPanel panel = new JPanel(new BorderLayout(0, HoloBioUiStyle.SPACE_1));
+        panel.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_1, 0, 0, 0));
 
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-        top.setBorder(HoloBioUiStyle.sectionBorder("Choose a Propagation Method"));
+        top.setBorder(HoloBioUiStyle.sectionPad("Method"));
         npPropagationMethodBox = new JComboBox<>(new String[] {"Angular Spectrum", "Fresnel"});
         npPropagationMethodBox.setLightWeightPopupEnabled(false);
+        npPropagationMethodBox.setToolTipText("Angular Spectrum: Fourier-domain propagator. Fresnel: paraxial kernel.");
         setFixedControlSize(npPropagationMethodBox, FORM_COMBO_W);
-        npPropagationMethodBox.addActionListener(e ->
-            debugLog("NP propagation method selected: " + selectedNumericalPropagationMethod()));
-        top.add(compactRow("Propagation method:", npPropagationMethodBox));
-        top.add(compactInfoRow("Tip:", "Run Compensation/Shifting first or Use Active Image."));
+        JPanel propMethodRow = compactRow("Propagation method:", npPropagationMethodBox);
+        propMethodRow.add(HoloBioUiStyle.infoButton("Angular Spectrum",
+            "Angular Spectrum propagates the complex field in the Fourier domain. "
+            + "Fresnel uses the paraxial quadratic-phase kernel."));
+        top.add(propMethodRow);
         top.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JPanel paramsPanel = new JPanel();
         paramsPanel.setLayout(new BoxLayout(paramsPanel, BoxLayout.Y_AXIS));
-        paramsPanel.setBorder(HoloBioUiStyle.sectionBorder("Physical Parameters"));
+        paramsPanel.setBorder(HoloBioUiStyle.sectionPad("Physical parameters"));
         tfNpLambda = new JTextField("", FIELD_COLS);
         tfNpPitchX = new JTextField("", FIELD_COLS);
         tfNpPitchY = new JTextField("", FIELD_COLS);
         setFixedControlSize(tfNpLambda, FORM_FIELD_W);
         setFixedControlSize(tfNpPitchX, FORM_FIELD_W);
         setFixedControlSize(tfNpPitchY, FORM_FIELD_W);
-        paramsPanel.add(compactRow("Wavelength (um):", tfNpLambda));
-        paramsPanel.add(compactRow("Pitch X (um):", tfNpPitchX));
-        paramsPanel.add(compactRow("Pitch Y (um):", tfNpPitchY));
+        HoloBioUiStyle.styleField(tfNpLambda);
+        HoloBioUiStyle.styleField(tfNpPitchX);
+        HoloBioUiStyle.styleField(tfNpPitchY);
+        tfNpLambda.setToolTipText("Illumination wavelength in micrometres.");
+        tfNpPitchX.setToolTipText("Sensor pixel pitch X in micrometres.");
+        tfNpPitchY.setToolTipText("Sensor pixel pitch Y in micrometres.");
+        paramsPanel.add(compactRow("Wavelength (µm):", tfNpLambda));
+        paramsPanel.add(compactRow("Pitch X (µm):", tfNpPitchX));
+        paramsPanel.add(compactRow("Pitch Y (µm):", tfNpPitchY));
         paramsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JPanel center = new JPanel(new BorderLayout(6, 6));
@@ -484,14 +448,15 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         JPanel bottom = new JPanel(new BorderLayout(4, 4));
         propOptionsNp = new PropagationUi(false);
         bottom.add(propOptionsNp.root, BorderLayout.CENTER);
-        JButton applyNP = new JButton("Apply");
-        applyNP.addActionListener(e -> {
+        JButton applyNP = HoloBioUiStyle.primaryButton("Apply");
+        applyNP.setToolTipText("Propagate the current field with these parameters.");
+        applyNP.addActionListener(e -> HoloBioUiStyle.runBusy(applyNP, "Working…", () -> {
             if (!readParamsFromNumericalPanel()) {
                 return;
             }
             ensureCurrentFieldFromHologram(true);
             _apply_propagation(propOptionsNp, selectedNumericalPropagationMethod());
-        });
+        }));
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         btnRow.add(applyNP);
         bottom.add(btnRow, BorderLayout.SOUTH);
@@ -515,29 +480,30 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private JPanel buildBottomBar() {
-        JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
-        JButton openOutputsButton = new JButton("Open Outputs");
-        JButton saveButton = new JButton("Save...");
-        JButton applyButton = new JButton("Apply");
-        JButton resetButton = new JButton("Reset");
+        JButton resetButton = HoloBioUiStyle.tertiaryButton("Reset");
+        JButton openOutputsButton = HoloBioUiStyle.secondaryButton("Open Outputs");
+        JButton saveButton = HoloBioUiStyle.secondaryButton("Save…");
+        btnApply = HoloBioUiStyle.primaryButton("Apply");
+
+        resetButton.setToolTipText("Clear the linked hologram and reconstructed outputs.");
+        openOutputsButton.setToolTipText("Bring amplitude, phase, and Fourier windows to the front.");
+        saveButton.setToolTipText("Save Fourier transform, phase, amplitude, or the complex field (.npy).");
+        btnApply.setToolTipText("Run the current submodule (compensate, shift, or propagate).");
 
         openOutputsButton.addActionListener(e -> openAllOutputsInFiji());
         saveButton.addActionListener(e -> onSave());
-        applyButton.addActionListener(e -> onApplyMvp());
+        btnApply.addActionListener(e -> HoloBioUiStyle.runBusy(btnApply, "Working…", this::onApplyMvp));
         resetButton.addActionListener(e -> onReset());
 
-        bottomBar.add(openOutputsButton);
-        bottomBar.add(saveButton);
-        bottomBar.add(applyButton);
-        bottomBar.add(resetButton);
-        return bottomBar;
+        return HoloBioUiStyle.buildActionBar(
+            resetButton, openOutputsButton, saveButton, btnApply);
     }
 
     private void onUseActiveImage() {
         debugLog("Use Active Image clicked.");
         ImagePlus imp = WindowManager.getCurrentImage();
         if (imp == null) {
-            IJ.showMessage("HoloBio", "Open an image in Fiji first, then click Use Active Image.");
+            HoloBioFijiUi.message("HoloBio", "Open an image in Fiji first, then click Use Active Image.");
             return;
         }
         loadHologramFromImagePlus(imp, "Active Hologram");
@@ -599,6 +565,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void onReset() {
+        if (!HoloBioUiStyle.confirm(null, "Reset DHM",
+                "Clear the linked hologram and all reconstructed outputs?")) {
+            return;
+        }
         debugLog("Reset clicked.");
         state.setHologramImage(null);
         state.setFourierImage(null);
@@ -616,7 +586,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     /** Python-like save menu for FT / phase / amplitude outputs. */
     private void onSave() {
         debugLog("Save clicked.");
-        String[] options = {"Save FT", "Save Phase", "Save Amplitude"};
+        String[] options = {"Save FT", "Save Phase", "Save Amplitude", "Save Complex Field (.npy)"};
         String choice = (String) JOptionPane.showInputDialog(
             null,
             "Choose what to save",
@@ -642,9 +612,39 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             case "Save Amplitude":
                 saveStateImage(state.getAmplitudeImage(), "Amplitude", "No amplitude image to save. Run compensation/shifting first.");
                 break;
+            case "Save Complex Field (.npy)":
+                saveComplexField();
+                break;
             default:
                 break;
         }
+    }
+
+    /**
+     * Save the current complex field as a complex64 .npy, cropped to the hologram's own
+     * footprint exactly like the Amplitude/Phase images — the working canvas is padded to a
+     * power of two, and the padding is not part of the reconstruction.
+     */
+    private void saveComplexField() {
+        float[] re = currentFieldRe, im = currentFieldIm;
+        int w = currentFieldW, h = currentFieldH;
+        if (re == null || im == null || w <= 0 || h <= 0) {
+            HoloBioNpy.saveComplexDialog("complex_field", null);
+            return;
+        }
+        boolean padded = srcWidth > 0 && srcHeight > 0 && (w != srcWidth || h != srcHeight)
+                && padOffsetX >= 0 && padOffsetY >= 0
+                && padOffsetX + srcWidth <= w && padOffsetY + srcHeight <= h;
+        if (padded) {
+            float[] cr = new float[srcWidth * srcHeight];
+            float[] ci = new float[srcWidth * srcHeight];
+            for (int y = 0; y < srcHeight; y++) {
+                System.arraycopy(re, (y + padOffsetY) * w + padOffsetX, cr, y * srcWidth, srcWidth);
+                System.arraycopy(im, (y + padOffsetY) * w + padOffsetX, ci, y * srcWidth, srcWidth);
+            }
+            re = cr; im = ci; w = srcWidth; h = srcHeight;
+        }
+        HoloBioNpy.saveComplexDialog("complex_field", re, im, w, h);
     }
 
     private void openAllOutputsInFiji() {
@@ -654,7 +654,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         opened += openOutputImageInFiji(state.getPhaseImage(), "Phase") ? 1 : 0;
         opened += openOutputImageInFiji(state.getFourierImage(), "FT") ? 1 : 0;
         if (opened == 0) {
-            IJ.showMessage("HoloBio", "No outputs available yet. Run compensation/shifting/propagation first.");
+            HoloBioFijiUi.message("HoloBio", "No outputs available yet. Run compensation/shifting/propagation first.");
             debugLog("Open All in Fiji result: no outputs.");
         } else {
             IJ.showStatus("HoloBio: Opened " + opened + " output image(s) as Fiji windows.");
@@ -686,7 +686,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 ft = computeLogPowerSpectrum(state.getHologramImage());
                 state.setFourierImage(ft.duplicate());
             } catch (RuntimeException ex) {
-                IJ.showMessage("HoloBio", "Could not build FT image for saving: " + ex.getMessage());
+                HoloBioFijiUi.message("HoloBio", "Could not build FT image for saving: " + ex.getMessage());
                 return;
             }
         }
@@ -695,7 +695,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void saveStateImage(ImagePlus image, String defaultName, String emptyMessage) {
         if (image == null) {
-            IJ.showMessage("HoloBio", emptyMessage);
+            HoloBioFijiUi.message("HoloBio", emptyMessage);
             return;
         }
         SaveDialog sd = new SaveDialog("Save " + defaultName, defaultName, ".tif");
@@ -712,7 +712,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         if (ok) {
             IJ.showStatus("HoloBio: Saved " + defaultName + " -> " + path);
         } else {
-            IJ.showMessage("HoloBio", "Failed to save image: " + path);
+            HoloBioFijiUi.message("HoloBio", "Failed to save image: " + path);
         }
     }
 
@@ -722,14 +722,44 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             params.setPixelPitchXUm(Double.parseDouble(tfPcPitchX.getText().trim()));
             params.setPixelPitchYUm(Double.parseDouble(tfPcPitchY.getText().trim()));
             if (!validatePositivePhysicalParams(false)) {
-                IJ.showMessage("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
                 return false;
             }
-            return true;
+            return confirmSensorPitchForCarrier();
         } catch (NumberFormatException ex) {
-            IJ.showMessage("HoloBio", "Invalid numeric parameter (phase compensation).");
+            HoloBioFijiUi.message("HoloBio", "Invalid numeric parameter (phase compensation).");
             return false;
         }
+    }
+
+    /**
+     * Carrier compensation uses sensor-plane pitch. If pitch &lt; λ/2, even Nyquist spatial
+     * frequency makes |sin θ| &gt; 1 and the reference wave clips (noisy amp / black phase patches).
+     * That usually means object-plane pitch (sensor/M) was entered by mistake.
+     */
+    private boolean confirmSensorPitchForCarrier() {
+        double lam = params.getWavelengthUm();
+        double dx = params.getPixelPitchXUm();
+        double dy = params.getPixelPitchYUm();
+        double maxSinX = lam / (2.0 * dx);
+        double maxSinY = lam / (2.0 * dy);
+        if (maxSinX <= 1.0 && maxSinY <= 1.0) {
+            return true;
+        }
+        int choice = JOptionPane.showConfirmDialog(
+                IJ.getInstance(),
+                String.format(
+                        "<html>Pixel pitch looks too small for carrier compensation "
+                                + "(λ/(2·pitch) = %.2f / %.2f &gt; 1).<br><br>"
+                                + "Use the <b>camera sensor</b> pitch (e.g. 3.75 µm), not sensor/M "
+                                + "(e.g. not 0.09375).<br>"
+                                + "Set magnification M under Propagation for µm/px profiles.<br><br>"
+                                + "Continue anyway?</html>",
+                        maxSinX, maxSinY),
+                "HoloBio — check sensor pitch",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE);
+        return choice == JOptionPane.YES_OPTION;
     }
 
     private boolean readParamsFromPhaseShiftPanel() {
@@ -738,12 +768,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             params.setPixelPitchXUm(Double.parseDouble(tfPsPitchX.getText().trim()));
             params.setPixelPitchYUm(Double.parseDouble(tfPsPitchY.getText().trim()));
             if (!validatePositivePhysicalParams(false)) {
-                IJ.showMessage("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
                 return false;
             }
             return true;
         } catch (NumberFormatException ex) {
-            IJ.showMessage("HoloBio", "Invalid numeric parameter (phase shifting).");
+            HoloBioFijiUi.message("HoloBio", "Invalid numeric parameter (phase shifting).");
             return false;
         }
     }
@@ -754,12 +784,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             params.setPixelPitchXUm(Double.parseDouble(tfNpPitchX.getText().trim()));
             params.setPixelPitchYUm(Double.parseDouble(tfNpPitchY.getText().trim()));
             if (!validatePositivePhysicalParams(false)) {
-                IJ.showMessage("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Wavelength, Pitch X and Pitch Y must be greater than zero.");
                 return false;
             }
             return true;
         } catch (NumberFormatException ex) {
-            IJ.showMessage("HoloBio", "Invalid numeric parameter (numerical propagation).");
+            HoloBioFijiUi.message("HoloBio", "Invalid numeric parameter (numerical propagation).");
             return false;
         }
     }
@@ -774,16 +804,20 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private void open_compensation_settings() {
         Frame owner = IJ.getInstance();
         JDialog dlg = new JDialog(owner, "Compensation Method Settings", true);
-        dlg.setLayout(new BorderLayout(8, 8));
+        dlg.setLayout(new BorderLayout(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_2));
 
         JTabbedPane tabs = new JTabbedPane();
         JTextField tfErsS = new JTextField(String.valueOf(compSettings.getErsSearchSize()), FIELD_COLS);
         JTextField tfErsStep = new JTextField(String.valueOf(compSettings.getErsStep()), FIELD_COLS);
-        JPanel tabSemi = new JPanel(new GridLayout(2, 2, 6, 6));
-        tabSemi.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        tabSemi.add(new JLabel("Size search (odd int):"));
+        HoloBioUiStyle.styleField(tfErsS);
+        HoloBioUiStyle.styleField(tfErsStep);
+        tfErsS.setToolTipText("Odd integer search window, e.g. 5 or 7.");
+        tfErsStep.setToolTipText("Step size strictly between 0 and 1, e.g. 0.2.");
+        JPanel tabSemi = new JPanel(new GridLayout(2, 2, HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_2));
+        tabSemi.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3));
+        tabSemi.add(HoloBioUiStyle.fieldLabel("Size search (odd int)"));
         tabSemi.add(tfErsS);
-        tabSemi.add(new JLabel("Step (0–1):"));
+        tabSemi.add(HoloBioUiStyle.fieldLabel("Step (0–1)"));
         tabSemi.add(tfErsStep);
         tabs.addTab("Semi-Heuristic", tabSemi);
 
@@ -791,7 +825,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         JTextField tfCfsGrid = new JTextField(String.valueOf(compSettings.getCfsGridSize()), FIELD_COLS);
         JPanel tabTu = new JPanel();
         tabTu.setLayout(new BoxLayout(tabTu, BoxLayout.Y_AXIS));
-        tabTu.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        tabTu.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3));
         JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT));
         row1.add(new JLabel("Step (FFT px half-width):"));
         row1.add(tfCfsStep);
@@ -817,7 +851,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         JCheckBox ckPca = new JCheckBox("PCA (dominant mode + unwrap)", compSettings.isVlPca());
         JPanel tabVl = new JPanel();
         tabVl.setLayout(new BoxLayout(tabVl, BoxLayout.Y_AXIS));
-        tabVl.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        tabVl.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_3));
         JPanel vlRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
         vlRow.add(new JLabel("Limit:"));
         vlRow.add(cbVlLimit);
@@ -828,12 +862,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
         dlg.add(tabs, BorderLayout.CENTER);
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER));
-        JButton ok = new JButton("Accept");
-        JButton cancel = new JButton("Cancel");
-        buttons.add(ok);
-        buttons.add(cancel);
-        dlg.add(buttons, BorderLayout.SOUTH);
+        JButton ok = HoloBioUiStyle.primaryButton("Save");
+        JButton cancel = HoloBioUiStyle.secondaryButton("Cancel");
+        dlg.add(HoloBioUiStyle.buildFooter("Saved values apply to the next Compensate.", cancel, ok), BorderLayout.SOUTH);
 
         ok.addActionListener(e -> {
             try {
@@ -891,7 +922,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private void run_phase_compensation() {
         debugLog("Compensate clicked.");
         if (!state.hasHologram()) {
-            IJ.showMessage("HoloBio", "Use an active image first.");
+            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
             return;
         }
         if (!readParamsFromPhaseCompPanel()) {
@@ -942,7 +973,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 result = HoloBioCompensationAlgorithms.ers(inp, cw, ch, lam, dx, dy, roiRect, ersS, ersSt);
             }
         } catch (RuntimeException ex) {
-            IJ.showMessage("HoloBio", "Phase compensation failed: " + ex.getMessage());
+            HoloBioFijiUi.message("HoloBio", "Phase compensation failed: " + ex.getMessage());
             IJ.handleException(ex);
             return;
         }
@@ -958,8 +989,17 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             im[i] = (float) f.im[i];
         }
         setCurrentField(re, im, fw, fh);
-        // Match Python PP behavior: after compensation, show the compensated field directly.
-        renderCurrentFieldWithoutPropagation(cw, ch);
+        // VL already letterboxes the square crop into the hologram frame. Pasting that
+        // onto the POT compensation canvas and cropToSource()'ing it again shifted the
+        // phase image relative to Python / QPI ROI coordinates.
+        if (fw == srcWidth && fh == srcHeight) {
+            FloatProcessor amp = amplitudeToDisplay(re, im, fw, fh);
+            FloatProcessor phs = phaseToDisplay(re, im, fw, fh);
+            state.setAmplitudeImage(new ImagePlus("Amplitude", amp));
+            state.setPhaseImage(new ImagePlus("Phase", phs));
+        } else {
+            renderCurrentFieldWithoutPropagation(cw, ch);
+        }
         debugLog(String.format("Compensation done. fx=%.3f fy=%.3f", result.fx, result.fy));
         debugLogOutputs("After compensation");
         update_right_view();
@@ -1037,7 +1077,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 requiredFrames = 2;
                 break;
             default:
-                IJ.showMessage("HoloBio", "Unsupported phase shifting method (use BPS3 or BPS2).");
+                HoloBioFijiUi.message("HoloBio", "Unsupported phase shifting method (use BPS3 or BPS2).");
                 return;
         }
 
@@ -1084,42 +1124,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         update_right_view();
     }
 
-    private void debugLog(String message) {
-        if (debugLogArea == null) {
-            return;
-        }
-        debugLogArea.append(message + "\n");
-        debugLogArea.setCaretPosition(debugLogArea.getDocument().getLength());
-    }
+    private void debugLog(String message) {}
 
-    private void debugLogOutputs(String prefix) {
-        String amp = state.getAmplitudeImage() != null
-            ? state.getAmplitudeImage().getWidth() + "x" + state.getAmplitudeImage().getHeight()
-            : "none";
-        String phs = state.getPhaseImage() != null
-            ? state.getPhaseImage().getWidth() + "x" + state.getPhaseImage().getHeight()
-            : "none";
-        String ft = state.getFourierImage() != null
-            ? state.getFourierImage().getWidth() + "x" + state.getFourierImage().getHeight()
-            : "none";
-        debugLog(prefix + " | outputs -> amp=" + amp + ", phase=" + phs + ", ft=" + ft);
-    }
+    private void debugLogOutputs(String prefix) {}
 
-    private void debugLogSelectionSnapshot(String prefix) {
-        String module = isModuleNumericalProp() ? "Numerical Propagation"
-            : isModulePhaseShift() ? "Phase Shifting"
-            : "Phase Compensation";
-        String compMethod = rbPcMethodTu != null && rbPcMethodTu.isSelected() ? "CFS"
-            : rbPcMethodVl != null && rbPcMethodVl.isSelected() ? "Vortex-Legendre"
-            : "ERS";
-        String filterMode = "Automatic (Rectangle)";
-        String psMethod = phaseShiftMethodBox != null ? String.valueOf(phaseShiftMethodBox.getSelectedItem()) : "n/a";
-        String npMethod = npPropagationMethodBox != null ? String.valueOf(npPropagationMethodBox.getSelectedItem()) : "n/a";
-        debugLog(prefix + " | module=" + module
-            + " comp=" + compMethod + "/" + filterMode
-            + " ps=" + psMethod
-            + " np=" + npMethod);
-    }
+    private void debugLogSelectionSnapshot(String prefix) {}
 
     private void renderCurrentFieldWithoutPropagation() {
         renderCurrentFieldWithoutPropagation(0, 0);
@@ -1207,11 +1216,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void _propagate_current_field(PropagationUi propUi, String method) {
         if (currentFieldRe == null || currentFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
-            IJ.showMessage("HoloBio", "No reconstructed field is available.");
+            HoloBioFijiUi.message("HoloBio", "No reconstructed field is available.");
             return;
         }
         if (propUi == null) {
-            IJ.showMessage("HoloBio", "Propagation options are not initialized.");
+            HoloBioFijiUi.message("HoloBio", "Propagation options are not initialized.");
             return;
         }
 
@@ -1225,7 +1234,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             double zMin = propUi.autofocusZMinUm();
             double zMax = propUi.autofocusZMaxUm();
             if (zMin <= 0.0) {
-                IJ.showMessage("HoloBio", "Autofocus z min must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Autofocus z min must be greater than zero.");
                 return;
             }
             if (zMax <= zMin) {
@@ -1237,14 +1246,14 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         } else if ("Z-scan".equals(mode)) {
             double zStart = propUi.effectiveZScanStartUm();
             if (zStart <= 0.0) {
-                IJ.showMessage("HoloBio", "Z-scan start z must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Z-scan start z must be greater than zero.");
                 return;
             }
             propagateSelectedAlgorithmInPlace(re, im, w, h, zStart, method);
         } else {
             double zEff = propUi.effectiveZFixedUm();
             if (zEff <= 0.0) {
-                IJ.showMessage("HoloBio", "Fixed propagation z must be greater than zero.");
+                HoloBioFijiUi.message("HoloBio", "Fixed propagation z must be greater than zero.");
                 return;
             }
             propagateSelectedAlgorithmInPlace(re, im, w, h, zEff, method);
@@ -1274,38 +1283,29 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void _on_tools_select(String selectedOption) {
         debugLog("Tools menu selected: " + selectedOption);
-        if ("Bio-Analysis".equals(selectedOption) || "QPI".equals(selectedOption)) {
-            IJ.showMessage("HoloBio", "Bio-Analysis (QPI / microstructure) is staged for a future release.\n"
-                + "Use Speckle for now.");
-            debugLog("Tools: Bio-Analysis requested (staged — not available).");
-        }
+        if ("QPI".equals(selectedOption) || "Bio-Analysis".equals(selectedOption)) apply_QPI();
         if ("Speckle".equals(selectedOption)) apply_speckle();
         if ("Speckle Filter".equals(selectedOption)) apply_speckle_filter();
     }
 
-    /** Opens combined Bio-Analysis dialog (QPI + Microstructure). */
-    private void apply_bio_analysis() {
-        debugLog("Tools: Bio-Analysis dialog requested.");
-        HoloBioToolDialogs.showBioAnalysisDialog(HoloBioToolDialogs.dialogOwnerOrNull(), createToolInputs());
-    }
-
     private void apply_QPI() {
-        apply_bio_analysis();
-    }
-
-    /** Not implemented. Python: {@code tools_microstructure.py}. */
-    private void apply_microstructure() {
-        IJ.showStatus("HoloBio: Microstructure — not implemented (see tools_microstructure.py).");
+        debugLog("Tools: QPI dialog requested.");
+        HoloBioFijiUi.showQpiDialog(dialogOwnerOrNull(), createToolInputs());
     }
 
     /** Opens Speckle dialog (HoloBio Python speckle panel). */
     private void apply_speckle() {
         debugLog("Tools: Speckle dialog requested.");
-        HoloBioToolDialogs.showSpeckleDialog(HoloBioToolDialogs.dialogOwnerOrNull(), createToolInputs(), toolCallbacks);
+        HoloBioFijiUi.showSpeckleDialog(dialogOwnerOrNull(), createToolInputs(), toolCallbacks);
     }
 
     private void apply_speckle_filter() {
-        HoloBioToolDialogs.showSpeckleDialog(HoloBioToolDialogs.dialogOwnerOrNull(), createToolInputs(), toolCallbacks);
+        HoloBioFijiUi.showSpeckleDialog(dialogOwnerOrNull(), createToolInputs(), toolCallbacks);
+    }
+
+    private java.awt.Frame dialogOwnerOrNull() {
+        ij.ImageJ ij = IJ.getInstance();
+        return ij instanceof java.awt.Frame ? (java.awt.Frame) ij : null;
     }
 
     private HoloBioToolInputs createToolInputs() {
@@ -1451,13 +1451,13 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private List<FloatProcessor> collectPhaseShiftFrames(int requiredFrames) {
         if (activeSourceImage == null) {
-            IJ.showMessage("HoloBio", "Use an active image first.");
+            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
             return null;
         }
         ImagePlus imp = activeSourceImage;
         int nPlanes = imp.getStackSize();
         if (nPlanes < requiredFrames) {
-            IJ.showMessage(
+            HoloBioFijiUi.message(
                 "HoloBio",
                 "Selected method needs " + requiredFrames
                     + " planes; this image has " + nPlanes
@@ -1473,7 +1473,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         for (int i = 1; i <= requiredFrames; i++) {
             ImageProcessor ip = stack.getProcessor(i);
             if (ip.getWidth() != w || ip.getHeight() != h) {
-                IJ.showMessage("HoloBio", "All phase-shift planes must have the same width and height.");
+                HoloBioFijiUi.message("HoloBio", "All phase-shift planes must have the same width and height.");
                 return null;
             }
             frames.add((FloatProcessor) ip.convertToFloatProcessor().duplicate());
@@ -1543,6 +1543,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         for (int i = 0; i < len; i++) {
             out[i] = (out[i] - min) * inv;
         }
+        // Pixels were mutated via getPixels(); refresh the (otherwise stale [0,0]) range.
+        fp.resetMinAndMax();
         return fp;
     }
 
@@ -1563,6 +1565,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             }
             out[i] = (float) (255.0 * t);
         }
+        // Pixels were mutated via getPixels(); refresh the (otherwise stale [0,0]) range.
+        fp.resetMinAndMax();
         return fp;
     }
 
@@ -1680,6 +1684,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
          */
         private final boolean scaleAxialWithMagnification;
         private final JComboBox<String> modeBox;
+        private final JComboBox<String> distanceUnitBox;
         private final JTextField lateralMagField;
         private final JTextField fixedDistanceField;
         private final JTextField zScanZMinField;
@@ -1687,9 +1692,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         private final JTextField zScanStepField;
         private final JTextField afZMinField;
         private final JTextField afZMaxField;
+        private final JLabel lblFixedDist, lblZStart, lblZEnd, lblZStep, lblAfMin, lblAfMax;
         private final JComboBox<String> autofocusMetricBox;
         private final JPanel cardPanel;
         private final CardLayout cardLayout;
+        private String distanceUnit = "µm";
+        private boolean updatingDistanceUi;
         /** Root panel added to each module (outer class cannot access a private inner field). */
         final JPanel root;
 
@@ -1699,72 +1707,123 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
         PropagationUi(boolean scaleAxialWithMagnification) {
             this.scaleAxialWithMagnification = scaleAxialWithMagnification;
-            root = new JPanel();
-            root.setLayout(new BoxLayout(root, BoxLayout.Y_AXIS));
-            root.setBorder(HoloBioUiStyle.sectionBorder("Propagation Options"));
-            root.setAlignmentX(Component.LEFT_ALIGNMENT);
+            root = HoloBioUiStyle.formSection("Propagation");
+            GridBagConstraints pc = HoloBioUiStyle.formGbc();
 
             modeBox = new JComboBox<>(new String[] {"Fixed", "Z-scan", "Autofocus"});
             modeBox.setLightWeightPopupEnabled(false);
-            setFixedControlSize(modeBox, FORM_COMBO_W);
             modeBox.addActionListener(e -> syncModeCards());
-            JPanel modeRow = compactRow("Mode:", modeBox);
-            root.add(modeRow);
+            HoloBioUiStyle.addLabelField(root, pc, "Mode", modeBox);
 
-            lateralMagField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(lateralMagField, FORM_FIELD_W);
-            JPanel magRow = compactRow("Lateral magnification M:", lateralMagField);
+            distanceUnitBox = new JComboBox<>(HoloBioUiStyle.DISTANCE_UNITS);
+            distanceUnitBox.setSelectedItem(distanceUnit);
+            distanceUnitBox.setLightWeightPopupEnabled(false);
+            distanceUnitBox.setToolTipText("Unit for propagation distances (model stays in µm)");
+            distanceUnitBox.addActionListener(e -> onDistanceUnitChanged());
+            HoloBioUiStyle.addLabelField(root, pc, "Distance unit", distanceUnitBox);
+
+            lateralMagField = new JTextField(HoloBioUiStyle.formatMag(40.0), FIELD_COLS);
             if (!scaleAxialWithMagnification) {
                 lateralMagField.setEnabled(false);
                 lateralMagField.setToolTipText(
-                    "Not used for axial z in Numerical Propagation (Python NP applies distance in um directly).");
+                    "Not used for axial z in Numerical Propagation (Python NP applies distance in µm directly).");
             }
-            root.add(magRow);
+            HoloBioUiStyle.addLabelField(root, pc, HoloBioUiStyle.MAG_LABEL, lateralMagField);
 
             cardLayout = new CardLayout();
-            cardPanel = new JPanel(cardLayout);
-            cardPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+            cardPanel = HoloBioUiStyle.huggingCardPanel(cardLayout);
+            cardPanel.setOpaque(false);
 
-            JPanel fixedCard = new JPanel();
-            fixedCard.setLayout(new BoxLayout(fixedCard, BoxLayout.Y_AXIS));
+            JPanel fixedCard = new JPanel(new GridBagLayout());
+            GridBagConstraints fc = HoloBioUiStyle.formGbc();
             fixedDistanceField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(fixedDistanceField, FORM_FIELD_W);
-            fixedCard.add(compactRow(scaleAxialWithMagnification ? "Distance (um):" : "Fixed z:", fixedDistanceField));
+            lblFixedDist = HoloBioUiStyle.addLabelField(fixedCard, fc,
+                scaleAxialWithMagnification ? "Distance (µm)" : "Fixed z (µm)", fixedDistanceField);
             cardPanel.add(fixedCard, "FIXED");
 
-            JPanel zCard = new JPanel();
-            zCard.setLayout(new BoxLayout(zCard, BoxLayout.Y_AXIS));
+            JPanel zCard = new JPanel(new GridBagLayout());
+            GridBagConstraints zc = HoloBioUiStyle.formGbc();
             zScanZMinField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(zScanZMinField, FORM_FIELD_W);
             zScanZMaxField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(zScanZMaxField, FORM_FIELD_W);
             zScanStepField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(zScanStepField, FORM_FIELD_W);
-            zCard.add(compactRow("z start (um):", zScanZMinField));
-            zCard.add(compactRow("z end (um):", zScanZMaxField));
-            zCard.add(compactRow("Step (um):", zScanStepField));
+            lblZStart = HoloBioUiStyle.addLabelField(zCard, zc, "z start (µm)", zScanZMinField);
+            lblZEnd   = HoloBioUiStyle.addLabelField(zCard, zc, "z end (µm)", zScanZMaxField);
+            lblZStep  = HoloBioUiStyle.addLabelField(zCard, zc, "Step (µm)", zScanStepField);
             cardPanel.add(zCard, "ZSCAN");
 
-            JPanel afCard = new JPanel();
-            afCard.setLayout(new BoxLayout(afCard, BoxLayout.Y_AXIS));
+            JPanel afCard = new JPanel(new GridBagLayout());
+            GridBagConstraints ac = HoloBioUiStyle.formGbc();
             afZMinField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(afZMinField, FORM_FIELD_W);
             afZMaxField = new JTextField("", FIELD_COLS);
-            setFixedControlSize(afZMaxField, FORM_FIELD_W);
             autofocusMetricBox = new JComboBox<>(new String[] {"Normalized Variance", "Tenengrad"});
             autofocusMetricBox.setLightWeightPopupEnabled(false);
-            setFixedControlSize(autofocusMetricBox, FORM_COMBO_W);
-            afCard.add(compactRow("z min (um):", afZMinField));
-            afCard.add(compactRow("z max (um):", afZMaxField));
-            afCard.add(compactRow("Autofocus metric:", autofocusMetricBox));
+            lblAfMin = HoloBioUiStyle.addLabelField(afCard, ac, "z min (µm)", afZMinField);
+            lblAfMax = HoloBioUiStyle.addLabelField(afCard, ac, "z max (µm)", afZMaxField);
+            HoloBioUiStyle.addLabelField(afCard, ac, "Autofocus metric", autofocusMetricBox,
+                HoloBioUiStyle.FORM_LABEL_W, 140);
             cardPanel.add(afCard, "AF");
 
-            root.add(cardPanel);
+            pc.gridx = 0;
+            pc.gridwidth = 2;
+            pc.fill = GridBagConstraints.HORIZONTAL;
+            pc.weightx = 1.0;
+            pc.weighty = 0;
+            pc.insets = new Insets(HoloBioUiStyle.SPACE_1, 0, 0, 0);
+            root.add(cardPanel, pc);
+
             syncModeCards();
 
             if (!scaleAxialWithMagnification) {
-                fixedDistanceField.setToolTipText("Fixed propagation z (um) for Numerical Propagation.");
+                fixedDistanceField.setToolTipText("Fixed propagation z for Numerical Propagation.");
             }
+        }
+
+        private void onDistanceUnitChanged() {
+            if (updatingDistanceUi) return;
+            String next = (String) distanceUnitBox.getSelectedItem();
+            if (next == null || next.equals(distanceUnit)) return;
+            double fixedUm = parseDistUm(fixedDistanceField, scaleAxialWithMagnification ? 5000.0 : 0.0);
+            double z0Um = parseDistUm(zScanZMinField, 1000.0);
+            double z1Um = parseDistUm(zScanZMaxField, 9000.0);
+            double stepUm = parseDistUm(zScanStepField, 100.0);
+            double af0Um = parseDistUm(afZMinField, 1000.0);
+            double af1Um = parseDistUm(afZMaxField, 9000.0);
+            distanceUnit = next;
+            updatingDistanceUi = true;
+            try {
+                refreshDistanceLabels();
+                fixedDistanceField.setText(fmtDist(fixedUm));
+                zScanZMinField.setText(fmtDist(z0Um));
+                zScanZMaxField.setText(fmtDist(z1Um));
+                zScanStepField.setText(fmtDist(stepUm));
+                afZMinField.setText(fmtDist(af0Um));
+                afZMaxField.setText(fmtDist(af1Um));
+            } finally {
+                updatingDistanceUi = false;
+            }
+        }
+
+        private void refreshDistanceLabels() {
+            String u = distanceUnit;
+            lblFixedDist.setText(scaleAxialWithMagnification ? "Distance (" + u + "):" : "Fixed z (" + u + "):");
+            lblZStart.setText("z start (" + u + "):");
+            lblZEnd.setText("z end (" + u + "):");
+            lblZStep.setText("Step (" + u + "):");
+            lblAfMin.setText("z min (" + u + "):");
+            lblAfMax.setText("z max (" + u + "):");
+        }
+
+        private double umPerUnit() {
+            return HoloBioUiStyle.umPerDistanceUnit(distanceUnit);
+        }
+
+        private double parseDistUm(JTextField tf, double fallbackUm) {
+            return parseDoubleOr(tf, fallbackUm / umPerUnit()) * umPerUnit();
+        }
+
+        private String fmtDist(double um) {
+            double v = um / umPerUnit();
+            return Math.abs(v) >= 100 ? String.format("%.0f", v) : String.format("%.4g", v);
         }
 
         private void syncModeCards() {
@@ -1777,7 +1836,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 cardLayout.show(cardPanel, "FIXED");
             }
             if (cardPanel.getParent() != null) {
+                cardPanel.revalidate();
                 cardPanel.getParent().revalidate();
+                java.awt.Window w = javax.swing.SwingUtilities.getWindowAncestor(cardPanel);
+                if (w != null) {
+                    HoloBioUiStyle.packTight(w, 0, 500, 720);
+                }
             }
         }
 
@@ -1806,24 +1870,24 @@ public class HoloBio_DHM_Plugin implements PlugIn {
          */
         private double effectiveZFixedUm() {
             if (!scaleAxialWithMagnification) {
-                return parseDoubleOr(fixedDistanceField, 0.0);
+                return parseDistUm(fixedDistanceField, 0.0);
             }
-            return parseDoubleOr(fixedDistanceField, 5000.0) * scaleImg();
+            return parseDistUm(fixedDistanceField, 5000.0) * scaleImg();
         }
 
         /** First plane for Z-scan (µm). */
         private double effectiveZScanStartUm() {
-            double z0 = parseDoubleOr(zScanZMinField, 1000.0);
+            double z0 = parseDistUm(zScanZMinField, 1000.0);
             return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
         }
 
         private double autofocusZMinUm() {
-            double z0 = parseDoubleOr(afZMinField, 1000.0);
+            double z0 = parseDistUm(afZMinField, 1000.0);
             return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
         }
 
         private double autofocusZMaxUm() {
-            double z0 = parseDoubleOr(afZMaxField, 9000.0);
+            double z0 = parseDistUm(afZMaxField, 9000.0);
             return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
         }
 

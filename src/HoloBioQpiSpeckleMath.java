@@ -41,7 +41,7 @@ public final class HoloBioQpiSpeckleMath {
     /** Phase along a straight segment (Python line profile). */
     public static double[] profileAlongLine(float[] img, int w, int h,
                                           double x1, double y1, double x2, double y2) {
-        int L = (int) Math.ceil(Math.hypot(x2 - x1, y2 - y1));
+        int L = (int) Math.hypot(x2 - x1, y2 - y1);
         L = Math.max(L, 2);
         double[] prof = new double[L];
         for (int k = 0; k < L; k++) {
@@ -49,6 +49,26 @@ public final class HoloBioQpiSpeckleMath {
             double x = x1 + (x2 - x1) * t;
             double y = y1 + (y2 - y1) * t;
             prof[k] = sampleBilinear(img, w, h, x, y);
+        }
+        return prof;
+    }
+
+    /**
+     * All pixels inside an axis-aligned rectangle (x,y,width,height), row-major.
+     * Used for live / QPI region stats where a box replaces a line.
+     */
+    public static double[] profileAlongRect(float[] img, int w, int h,
+                                            double x, double y, double rw, double rh) {
+        int x0 = (int) Math.max(0, Math.floor(x));
+        int y0 = (int) Math.max(0, Math.floor(y));
+        int x1 = (int) Math.min(w, Math.ceil(x + rw));
+        int y1 = (int) Math.min(h, Math.ceil(y + rh));
+        if (x1 <= x0 || y1 <= y0) return new double[0];
+        double[] prof = new double[(x1 - x0) * (y1 - y0)];
+        int k = 0;
+        for (int yy = y0; yy < y1; yy++) {
+            int row = yy * w;
+            for (int xx = x0; xx < x1; xx++) prof[k++] = img[row + xx];
         }
         return prof;
     }
@@ -297,6 +317,7 @@ public final class HoloBioQpiSpeckleMath {
         return Math.sqrt(var) / (mean + 1e-9);
     }
 
+    /** Max-only scale (plugin preview); speckle SPP uses {@link #complexToAmplitudeMinMax0255}. */
     public static float[] complexToAmplitude0255(float[] re, float[] im) {
         int n = re.length;
         float max = 0f;
@@ -314,6 +335,31 @@ public final class HoloBioQpiSpeckleMath {
         return clip0255(amp);
     }
 
+    /**
+     * Python SPP post-filter: {@code 255*(amp - amp.min()) / (amp.max() - amp.min())}.
+     */
+    public static float[] complexToAmplitudeMinMax0255(float[] re, float[] im) {
+        int n = re.length;
+        float[] amp = new float[n];
+        for (int i = 0; i < n; i++) {
+            amp[i] = (float) Math.hypot(re[i], im[i]);
+        }
+        return minMax0255(amp);
+    }
+
+    /**
+     * Python SPP post-filter: {@code 255*(phase - phase.min()) / (phase.max() - phase.min())}.
+     */
+    public static float[] complexToPhaseMinMax0255(float[] re, float[] im) {
+        int n = re.length;
+        float[] ph = new float[n];
+        for (int i = 0; i < n; i++) {
+            ph[i] = (float) Math.atan2(im[i], re[i]);
+        }
+        return minMax0255(ph);
+    }
+
+    /** Percentile stretch (plugin phase preview); not used for speckle measure. */
     public static float[] complexToPhase0255(float[] re, float[] im) {
         int n = re.length;
         float[] ph = new float[n];
@@ -321,6 +367,32 @@ public final class HoloBioQpiSpeckleMath {
             ph[i] = (float) Math.atan2(im[i], re[i]);
         }
         return phasePercentileStretch0255(ph);
+    }
+
+    /** Min–max to [0,255] (Python {@code amp_norm} / SPP display). */
+    public static float[] minMax0255(float[] data) {
+        if (data == null || data.length == 0) {
+            return null;
+        }
+        double mn = data[0];
+        double mx = data[0];
+        for (float v : data) {
+            if (v < mn) {
+                mn = v;
+            }
+            if (v > mx) {
+                mx = v;
+            }
+        }
+        float[] o = new float[data.length];
+        if (Math.abs(mx - mn) < 1e-12) {
+            return o;
+        }
+        double inv = 255.0 / (mx - mn);
+        for (int i = 0; i < data.length; i++) {
+            o[i] = (float) ((data[i] - mn) * inv);
+        }
+        return clip0255(o);
     }
 
     private static float[] phasePercentileStretch0255(float[] ph) {

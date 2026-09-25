@@ -1,18 +1,23 @@
 import ij.IJ;
 import ij.ImagePlus;
+import ij.gui.Overlay;
+import ij.gui.OvalRoi;
 import ij.gui.Plot;
+import ij.gui.TextRoi;
 import ij.measure.ResultsTable;
 import ij.plugin.filter.ParticleAnalyzer;
 import ij.process.ByteProcessor;
 import ij.process.FloatProcessor;
 import ij.process.ImageProcessor;
+import java.awt.Color;
+import java.awt.Font;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
 /**
- * Microstructure metrics (Python {@code tools_microstructure}): thresholding, particle detection,
- * automatic phase profiles, thickness maps. Excludes count/area-only particle reports.
+ * Microstructure metrics (Python {@code tools_microstructure}): thresholding, watershed
+ * separation, particle detection, count/area reports, automatic phase profiles, thickness maps.
  */
 public final class HoloBioMicrostructureMath {
 
@@ -57,19 +62,41 @@ public final class HoloBioMicrostructureMath {
     public static boolean[] createBinaryMask(byte[] gray, int w, int h, String method, double manualThreshold) {
         int n = w * h;
         double thresh;
+        boolean[] mask;
         if ("manual".equalsIgnoreCase(method)) {
             thresh = manualThreshold;
+            mask = new boolean[n];
+            for (int i = 0; i < n; i++) mask[i] = (gray[i] & 0xff) <= thresh;
         } else if ("adaptive".equalsIgnoreCase(method)) {
-            return adaptiveThresholdMask(gray, w, h);
+            mask = adaptiveThresholdMask(gray, w, h);
         } else {
             thresh = otsuHistogram(gray);
+            mask = new boolean[n];
+            for (int i = 0; i < n; i++) mask[i] = (gray[i] & 0xff) <= thresh;
         }
-        boolean[] mask = new boolean[n];
-        for (int i = 0; i < n; i++) {
-            int v = gray[i] & 0xff;
-            mask[i] = v > thresh;
+        // Separate touching blobs (Python separate_touching_samples / ImageJ Watershed).
+        return applyWatershedSeparation(mask, w, h);
+    }
+
+    /**
+     * ImageJ binary Watershed on the foreground mask — splits touching particles along
+     * distance ridges so ParticleAnalyzer sees them as separate components.
+     */
+    private static boolean[] applyWatershedSeparation(boolean[] mask, int w, int h) {
+        int fg = 0;
+        for (boolean b : mask) if (b) fg++;
+        if (fg < 8) return mask;
+        ByteProcessor bp = maskToByte(mask, w, h);
+        ImagePlus tmp = new ImagePlus("ws", bp);
+        try {
+            IJ.run(tmp, "Watershed", "");
+        } catch (Throwable ignored) {
+            return mask;
         }
-        return mask;
+        ImageProcessor ip = tmp.getProcessor();
+        boolean[] out = new boolean[w * h];
+        for (int i = 0; i < out.length; i++) out[i] = ip.get(i) > 0;
+        return out;
     }
 
     private static double otsuHistogram(byte[] gray) {
@@ -127,7 +154,7 @@ public final class HoloBioMicrostructureMath {
                 }
                 double mean = sum / (double) cnt;
                 int v = gray[y * w + x] & 0xff;
-                mask[y * w + x] = v > mean - 5;
+                mask[y * w + x] = v <= mean - 5;  // matches Python bitwise_not: True = below local mean
             }
         }
         return mask;
@@ -181,20 +208,15 @@ public final class HoloBioMicrostructureMath {
         return rt.size();
     }
 
-    /** Shows grayscale image with particle outlines for current area range. */
+    /**
+     * Builds the binary mask image for the area-filter preview (caller is responsible for showing it).
+     * Uses SHOW_NONE to avoid Fiji creating a second "Drawing of..." window.
+     */
     public static ImagePlus showAreaFilterPreview(byte[] gray, int w, int h, String method,
                                                   double manualThreshold, int minArea, int maxArea) {
         boolean[] mask = createBinaryMask(gray, w, h, method, manualThreshold);
         ByteProcessor bp = maskToByte(mask, w, h);
-        ImagePlus imp = new ImagePlus("HoloBio — area filter preview", bp.duplicate());
-        ResultsTable rt = new ResultsTable();
-        int options = ParticleAnalyzer.SHOW_OUTLINES;
-        int measurements = ParticleAnalyzer.AREA + ParticleAnalyzer.CENTER_OF_MASS;
-        ParticleAnalyzer pa = new ParticleAnalyzer(
-            options, measurements, rt, minArea, maxArea);
-        pa.analyze(imp);
-        HoloBioFijiUi.showImagePlus(imp);
-        return imp;
+        return new ImagePlus("HoloBio — Segmentation preview", bp);
     }
 
     public static byte[] toByteGray(float[] display0255, int w, int h) {
@@ -214,25 +236,133 @@ public final class HoloBioMicrostructureMath {
         return ph;
     }
 
+    /** Color palette shared between detection overlay and combined profile plot. */
+    private static final Color[] PROFILE_COLORS = {
+        new Color(231, 76,  60),   // red
+        new Color(52,  152, 219),  // blue
+        new Color(46,  204, 113),  // green
+        new Color(155, 89,  182),  // purple
+        new Color(241, 196, 15),   // yellow
+        new Color(26,  188, 156),  // teal
+    };
+
+    /**
+     * Show detected particles as white circles over the segmentation mask.
+     * Call this after {@link #processParticles} so the user can verify detection before analysis.
+     */
+    /**
+     * Count / area reports matching Python {@code apply_count_particles} /
+     * {@code apply_area_particles}.
+     */
+    public static void showParticleReports(ProcessResult proc, double umPerPx,
+                                           boolean count, boolean area) {
+        if (proc.particles.isEmpty()) {
+            HoloBioFijiUi.message("HoloBio", "No particles detected for count/area report.");
+            return;
+        }
+        if (count) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Particles accepted (area filter): ").append(proc.particles.size()).append('\n');
+            sb.append(String.format("Threshold used: %.1f%n", proc.thresholdUsed));
+            sb.append("Sample polarity: ").append(proc.sampleIsWhite ? "white" : "black");
+            HoloBioFijiUi.message("HoloBio — Particle count", sb.toString());
+            HoloBioFijiUi.log("[HoloBio Microstructure] count=" + proc.particles.size());
+        }
+        if (area) {
+            double u2 = umPerPx > 0 ? umPerPx * umPerPx : 1.0;
+            ResultsTable rt = new ResultsTable();
+            double sum = 0, sum2 = 0, amin = Double.POSITIVE_INFINITY, amax = 0;
+            for (int i = 0; i < proc.particles.size(); i++) {
+                Particle p = proc.particles.get(i);
+                double aUm2 = p.area * u2;
+                sum += aUm2;
+                sum2 += aUm2 * aUm2;
+                if (aUm2 < amin) amin = aUm2;
+                if (aUm2 > amax) amax = aUm2;
+                rt.incrementCounter();
+                rt.addValue("Particle", i + 1);
+                rt.addValue("Area (px²)", p.area);
+                rt.addValue("Area (µm²)", aUm2);
+                rt.addValue("Diameter (px)", p.diameter);
+                rt.addValue("X", p.centerX);
+                rt.addValue("Y", p.centerY);
+            }
+            int n = proc.particles.size();
+            double mean = sum / n;
+            double sd = n > 1 ? Math.sqrt(Math.max(0, (sum2 - sum * sum / n) / (n - 1))) : 0;
+            rt.show("HoloBio — Particle areas");
+            HoloBioFijiUi.message("HoloBio — Area summary",
+                String.format("n=%d%nMean area: %.2f ± %.2f µm²%nRange: %.2f – %.2f µm²",
+                    n, mean, sd, amin, amax));
+        }
+    }
+
+    public static void showDetectionOverlay(ProcessResult proc, int w, int h) {
+        if (proc.particles.isEmpty()) {
+            HoloBioFijiUi.message("HoloBio", "No particles detected in the given area range.");
+            return;
+        }
+        ImagePlus detImp = new ImagePlus(
+            "HoloBio — " + proc.particles.size() + " particle(s) detected",
+            maskToByte(proc.mask, w, h));
+        Overlay ov = new Overlay();
+        for (int i = 0; i < proc.particles.size(); i++) {
+            Particle p   = proc.particles.get(i);
+            double   r   = p.diameter / 2.0;
+            Color    col = PROFILE_COLORS[i % PROFILE_COLORS.length];
+
+            OvalRoi oval = new OvalRoi(p.centerX - r, p.centerY - r, p.diameter, p.diameter);
+            oval.setStrokeColor(col);
+            oval.setStrokeWidth(2f);
+            ov.add(oval);
+
+            TextRoi lbl = new TextRoi((int)(p.centerX + r + 2), (int)(p.centerY - 4),
+                String.valueOf(i + 1), new Font("SansSerif", Font.BOLD, 11));
+            lbl.setStrokeColor(col);
+            ov.add(lbl);
+        }
+        detImp.setOverlay(ov);
+        HoloBioFijiUi.showImagePlus(detImp);
+    }
+
     /** Automatic phase profiles across detected particles (Python {@code automaticProfile}). */
     public static void runAutomaticPhaseProfiles(byte[] gray, int w, int h, ProcessResult proc,
                                                  float[] phaseRad, double umPerPx) {
         if (proc.particles.isEmpty()) {
-            IJ.showMessage("HoloBio", "No particles found for automatic phase profiles.");
+            HoloBioFijiUi.message("HoloBio", "No particles found for automatic phase profiles.");
             return;
         }
         int[] labels = labelMask(proc.sampleIsWhite ? proc.mask : invert(proc.mask, w, h), w, h);
+
+        // Phase image (Fire LUT) with overlay — circles + colored profile lines
+        FloatProcessor phFp = new FloatProcessor(w, h, phaseRad.clone());
+        phFp.setMinAndMax(-Math.PI, Math.PI);
+        ImagePlus phaseImp = new ImagePlus("HoloBio — Phase profiles", phFp);
+        IJ.run(phaseImp, "Fire", "");
+        Overlay overlay = new Overlay();
+
+        // White outline circles for every detected particle
+        for (Particle p : proc.particles) {
+            double r    = p.diameter / 2.0;
+            OvalRoi oval = new OvalRoi(p.centerX - r, p.centerY - r, p.diameter, p.diameter);
+            oval.setStrokeColor(Color.WHITE);
+            oval.setStrokeWidth(1.5f);
+            overlay.add(oval);
+        }
+
+        // Gather valid profiles
         ResultsTable rt = new ResultsTable();
-        ImagePlus overlay = new ImagePlus("Phase profiles overlay",
-            phaseOverlayByte(phaseRad, w, h));
-        overlay.show();
+        List<double[]> allDist  = new ArrayList<>();
+        List<double[]> allProf  = new ArrayList<>();
+        List<double[]> allStats = new ArrayList<>();
+        List<Integer>  sampleNr = new ArrayList<>();
+        int colorIdx = 0;
 
         for (int si = 0; si < proc.particles.size(); si++) {
-            Particle s = proc.particles.get(si);
+            Particle s  = proc.particles.get(si);
             LineEndpoints ep = findProfileEndpoints(proc.mask, labels, w, h, s, proc.sampleIsWhite);
-            if (ep == null) {
-                continue;
-            }
+            if (ep == null) continue;
+
             int n = Math.max(2, (int) Math.hypot(ep.x2 - ep.x1, ep.y2 - ep.y1));
             double[] dist = new double[n];
             double[] prof = new double[n];
@@ -241,25 +371,70 @@ public final class HoloBioMicrostructureMath {
                 double x = ep.x1 + (ep.x2 - ep.x1) * t;
                 double y = ep.y1 + (ep.y2 - ep.y1) * t;
                 double v = HoloBioQpiSpeckleMath.sampleBilinear(phaseRad, w, h, x, y);
-                if (!Double.isNaN(v)) {
-                    v = (v + Math.PI) % (2 * Math.PI) - Math.PI;
-                }
+                if (!Double.isNaN(v)) v = (v + Math.PI) % (2 * Math.PI) - Math.PI;
                 prof[k] = Double.isNaN(v) ? 0 : v;
                 dist[k] = umPerPx > 0 ? k * umPerPx : k;
             }
-            double dphi = profileDeltaPhi(prof);
-            rt.incrementCounter();
-            rt.addValue("Sample", si + 1);
-            rt.addValue("Delta_phi_rad", dphi);
-            rt.addValue("Center_X", s.centerX);
-            rt.addValue("Center_Y", s.centerY);
+            double[] stats  = profileDeltaPhi(prof);
+            double phiLow   = stats[0], phiHigh = stats[1], delta = stats[2];
 
-            Plot plot = new Plot("Phase profile — sample " + (si + 1),
-                umPerPx > 0 ? "Distance (µm)" : "Pixel", "Phase (rad)", dist, prof);
+            rt.incrementCounter();
+            rt.addValue("Sample",        si + 1);
+            rt.addValue("Delta_phi_rad", delta);
+            rt.addValue("phi_low_5pct",  phiLow);
+            rt.addValue("phi_high_5pct", phiHigh);
+            rt.addValue("Center_X",      s.centerX);
+            rt.addValue("Center_Y",      s.centerY);
+
+            // Colored profile line on the phase image overlay
+            Color lineCol = PROFILE_COLORS[colorIdx % PROFILE_COLORS.length];
+            ij.gui.Line lineRoi = new ij.gui.Line(ep.x1, ep.y1, ep.x2, ep.y2);
+            lineRoi.setStrokeColor(lineCol);
+            lineRoi.setStrokeWidth(2f);
+            overlay.add(lineRoi);
+
+            // Small numbered label at the line start
+            TextRoi nr = new TextRoi((int) ep.x1, (int) ep.y1,
+                String.valueOf(si + 1), new Font("SansSerif", Font.BOLD, 10));
+            nr.setStrokeColor(lineCol);
+            overlay.add(nr);
+
+            allDist .add(dist);
+            allProf .add(prof);
+            allStats.add(stats);
+            sampleNr.add(si + 1);
+            colorIdx++;
+        }
+
+        phaseImp.setOverlay(overlay);
+        HoloBioFijiUi.showImagePlus(phaseImp);
+
+        // Single combined profile plot — all samples, one window
+        if (!allProf.isEmpty()) {
+            String xLabel = umPerPx > 0 ? "Distance (µm)" : "Pixel";
+            Plot plot = new Plot(
+                "HoloBio — Phase profiles (" + allProf.size() + " samples)", xLabel, "Phase (rad)");
+            StringBuilder legend = new StringBuilder();
+            for (int i = 0; i < allProf.size(); i++) {
+                Color      c    = PROFILE_COLORS[i % PROFILE_COLORS.length];
+                double[]   xs   = allDist.get(i);
+                double[]   ps   = allProf.get(i);
+                double[]   st   = allStats.get(i);
+                plot.setColor(c);
+                plot.add("line", xs, ps);
+
+                legend.append(String.format("S%d  Δφ=%.3f  (5%%lo=%.3f  hi=%.3f rad)",
+                    sampleNr.get(i), st[2], st[0], st[1]));
+                if (i < allProf.size() - 1) legend.append("\n");
+            }
+            plot.setColor(Color.BLACK);
+            plot.addLegend(legend.toString());
             plot.show();
         }
+
         rt.show("HoloBio Phase Profiles");
-        HoloBioFijiUi.log("[HoloBio] Automatic phase profiles: " + rt.size() + " sample(s).");
+        HoloBioFijiUi.log("[HoloBio] Phase profiles: " + rt.size() + " / " + proc.particles.size()
+            + " sample(s) valid.");
     }
 
     public static void runThicknessEstimation(byte[] gray, int w, int h, String method,
@@ -311,19 +486,20 @@ public final class HoloBioMicrostructureMath {
         return bp;
     }
 
-    private static double profileDeltaPhi(double[] prof) {
+    private static double[] profileDeltaPhi(double[] prof) {
         double[] p = Arrays.stream(prof).filter(v -> !Double.isNaN(v)).sorted().toArray();
         if (p.length < 4) {
-            return Double.NaN;
+            return new double[]{Double.NaN, Double.NaN, Double.NaN};
         }
         int n5 = Math.max(1, (int) Math.floor(0.05 * p.length));
         double low = 0;
         double high = 0;
         for (int i = 0; i < n5; i++) {
-            low += p[i];
+            low  += p[i];
             high += p[p.length - 1 - i];
         }
-        return Math.abs(high / n5 - low / n5);
+        low /= n5; high /= n5;
+        return new double[]{low, high, high - low};
     }
 
     private static final class LineEndpoints {
@@ -354,9 +530,14 @@ public final class HoloBioMicrostructureMath {
                 double y1 = cy - dy;
                 double x2 = cx + dx;
                 double y2 = cy + dy;
-                if (!segmentOutsideSample(finalMask, w, h, x1, y1, x2, y2, sampleIsWhite)) {
+                // Bounds check (Python: skip if endpoints out of image)
+                if (x1 < 0 || y1 < 0 || x1 >= w || y1 >= h
+                        || x2 < 0 || y2 < 0 || x2 >= w || y2 >= h) continue;
+                // Endpoints must be outside the sample (like Python: v1/v2 not inside)
+                if (!endpointsOutsideSample(finalMask, w, h, x1, y1, x2, y2, sampleIsWhite)) {
                     continue;
                 }
+                // Line must not cross a different sample
                 if (segmentCrossesOtherLabel(labels, w, h, x1, y1, x2, y2, labelExcl)) {
                     continue;
                 }
@@ -373,24 +554,22 @@ public final class HoloBioMicrostructureMath {
         return labels[y * w + x];
     }
 
-    private static boolean segmentOutsideSample(boolean[] mask, int w, int h,
-                                                double x1, double y1, double x2, double y2,
-                                                boolean sampleIsWhite) {
-        int n = Math.max(2, (int) Math.hypot(x2 - x1, y2 - y1));
-        for (int k = 0; k < n; k++) {
-            double t = k / (double) (n - 1);
-            int x = (int) Math.round(x1 + (x2 - x1) * t);
-            int y = (int) Math.round(y1 + (y2 - y1) * t);
-            if (x < 0 || y < 0 || x >= w || y >= h) {
-                return false;
-            }
-            boolean inside = mask[y * w + x];
-            boolean inSample = sampleIsWhite ? inside : !inside;
-            if (inSample) {
-                return false;
-            }
-        }
-        return true;
+    /**
+     * Returns true only if BOTH endpoints are outside the sample.
+     * Matches Python find_profile_endpoints: only checks v1/v2 at the two endpoints,
+     * not the whole segment (the line is expected to cross through the sample).
+     */
+    private static boolean endpointsOutsideSample(boolean[] mask, int w, int h,
+                                                  double x1, double y1, double x2, double y2,
+                                                  boolean sampleIsWhite) {
+        int xi1 = clamp((int) Math.round(x1), 0, w - 1);
+        int yi1 = clamp((int) Math.round(y1), 0, h - 1);
+        int xi2 = clamp((int) Math.round(x2), 0, w - 1);
+        int yi2 = clamp((int) Math.round(y2), 0, h - 1);
+        boolean in1 = mask[yi1 * w + xi1];
+        boolean in2 = mask[yi2 * w + xi2];
+        if (!sampleIsWhite) { in1 = !in1; in2 = !in2; }
+        return !in1 && !in2;
     }
 
     private static boolean segmentCrossesOtherLabel(int[] labels, int w, int h,

@@ -193,6 +193,20 @@ public final class HoloBioToolInputs {
         return o;
     }
 
+    /**
+     * 0–255 base for speckle HMF / measure — matches Python {@code original_amplitude_arrays} /
+     * {@code original_phase_arrays} at reconstruction.
+     */
+    public static float[] speckleChannelBase0255(HoloBioToolInputs in, boolean amplitudeChannel) {
+        if (in == null) {
+            return null;
+        }
+        if (amplitudeChannel) {
+            return in.hasAmplitudeField() ? minMax0255(in.amplitudeFromField) : null;
+        }
+        return in.hasPhaseField() ? phasePythonSpeckle0255(in.phaseRadians) : null;
+    }
+
     /** Min–max scale to 0–255 (Python speckle display / {@code amplitude_arrays}). */
     public static float[] minMax0255(float[] data) {
         if (data == null || data.length == 0) {

@@ -871,6 +871,73 @@ public final class HoloBioCompensationAlgorithms {
 
     private static void fft1d(double[] re, double[] im, boolean inverse) {
         int n = re.length;
+        if (n <= 1) return;
+        if ((n & (n - 1)) == 0) {
+            fft1dRadix2(re, im, inverse);
+            return;
+        }
+        fft1dBluestein(re, im, inverse);
+    }
+
+    /** Chirp-z FFT for non–power-of-two lengths (numpy {@code fft}). */
+    private static void fft1dBluestein(double[] aRe, double[] aIm, boolean inverse) {
+        int n = aRe.length;
+        int m = 1;
+        while (m < 2 * n - 1) m <<= 1;
+        double dir = inverse ? 1.0 : -1.0;
+
+        double[] chirpRe = new double[n];
+        double[] chirpIm = new double[n];
+        for (int k = 0; k < n; k++) {
+            double ang = dir * Math.PI * (k * (double) k) / n;
+            chirpRe[k] = Math.cos(ang);
+            chirpIm[k] = Math.sin(ang);
+        }
+
+        double[] yRe = new double[m];
+        double[] yIm = new double[m];
+        for (int k = 0; k < n; k++) {
+            yRe[k] = aRe[k] * chirpRe[k] - aIm[k] * chirpIm[k];
+            yIm[k] = aRe[k] * chirpIm[k] + aIm[k] * chirpRe[k];
+        }
+
+        double[] cRe = new double[m];
+        double[] cIm = new double[m];
+        cRe[0] = 1.0;
+        for (int k = 1; k < n; k++) {
+            double ang = -dir * Math.PI * (k * (double) k) / n;
+            double cr = Math.cos(ang), ci = Math.sin(ang);
+            cRe[k] = cr;
+            cIm[k] = ci;
+            cRe[m - k] = cr;
+            cIm[m - k] = ci;
+        }
+
+        fft1dRadix2(yRe, yIm, false);
+        fft1dRadix2(cRe, cIm, false);
+        for (int i = 0; i < m; i++) {
+            double tr = yRe[i] * cRe[i] - yIm[i] * cIm[i];
+            double ti = yRe[i] * cIm[i] + yIm[i] * cRe[i];
+            yRe[i] = tr;
+            yIm[i] = ti;
+        }
+        fft1dRadix2(yRe, yIm, true);
+
+        for (int k = 0; k < n; k++) {
+            double tr = yRe[k] * chirpRe[k] - yIm[k] * chirpIm[k];
+            double ti = yRe[k] * chirpIm[k] + yIm[k] * chirpRe[k];
+            if (inverse) {
+                aRe[k] = tr / n;
+                aIm[k] = ti / n;
+            } else {
+                aRe[k] = tr;
+                aIm[k] = ti;
+            }
+        }
+    }
+
+    private static void fft1dRadix2(double[] re, double[] im, boolean inverse) {
+        int n = re.length;
         if ((n & (n - 1)) != 0) throw new IllegalArgumentException("FFT length must be power of two.");
         bitReverse(re, im);
         for (int len = 2; len <= n; len <<= 1) {

@@ -50,7 +50,7 @@ public final class HoloBioPhaseShifting {
         int M = frames.get(0).getHeight();
         for (FloatProcessor fp : frames) {
             if (fp.getWidth() != N || fp.getHeight() != M) {
-                IJ.showMessage("HoloBio", "All phase-shift frames must have the same size.");
+                HoloBioFijiUi.message("HoloBio", "All phase-shift frames must have the same size.");
                 return null;
             }
         }
@@ -59,13 +59,13 @@ public final class HoloBioPhaseShifting {
         try {
             cropped = cropFramesToPow2Square(frames);
         } catch (IllegalArgumentException ex) {
-            IJ.showMessage("HoloBio", ex.getMessage());
+            HoloBioFijiUi.message("HoloBio", ex.getMessage());
             return null;
         }
         int cropW = cropped.get(0).getWidth();
         int cropH = cropped.get(0).getHeight();
         if (cropW != cropH || !HoloBioRectFft.isPowerOfTwo(cropW)) {
-            IJ.showMessage("HoloBio", "Internal error: BPS crop size must be a power-of-two square.");
+            HoloBioFijiUi.message("HoloBio", "Internal error: BPS crop size must be a power-of-two square.");
             return null;
         }
         if (cropW != N || cropH != M) {
@@ -87,11 +87,11 @@ public final class HoloBioPhaseShifting {
                     }
                     return bps2(cropped, cropH, cropW, wavelengthUm, dxUm, dyUm);
                 default:
-                    IJ.showMessage("HoloBio", "Unsupported phase shifting method (only BPS3 and BPS2 are available).");
+                    HoloBioFijiUi.message("HoloBio", "Unsupported phase shifting method (only BPS3 and BPS2 are available).");
                     return null;
             }
         } catch (IllegalArgumentException ex) {
-            IJ.showMessage("HoloBio", ex.getMessage());
+            HoloBioFijiUi.message("HoloBio", ex.getMessage());
             return null;
         }
     }
