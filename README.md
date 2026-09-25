@@ -1,9 +1,9 @@
-# HoloBio — ImageJ / Fiji Plugin
+# HoloBio — Fiji Plugin
 
 Digital holographic microscopy (DHM) and lensless digital holographic microscopy (DLHM)
 for Fiji, with both offline post-processing and live camera reconstruction.
 
-Ported from the HoloBio Python platform; the reconstruction math follows the Python
+Ported from the HoloBio Python (https://sophia-research-lab.github.io/HoloBio/) platform; the reconstruction math follows the Python
 reference implementations (`pyDHM_methods`, `phaseShifting`, `parallel_rc`).
 
 ## Modules
@@ -18,13 +18,12 @@ The plugin installs four commands under **Plugins ▸ HoloBio**:
 | **Real-Time DLHM** | Live lensless reconstruction from a camera or video file, with video recording, complex-field recording, and live camera exposure / gain |
 
 Analysis tools (**QPI** and **Speckle**) open from the Offline modules' *Analysis tools*
-menu: phase profiles, thickness maps, particle/microstructure statistics, and speckle
-contrast and filtering.
+menu: phase profiles and speckle
 
 ## Requirements
 
 - [Fiji](https://fiji.sc/) — the bundled Java 8 build is what this targets
-- A webcam or video file for the real-time modules (optional)
+- A webcam or video file for the real-time modules 
 - To **build from source**: the JDK inside your Fiji install
   (`Fiji.app/java/<platform>/<jdk>/bin/javac`)
 
@@ -73,26 +72,15 @@ contrast and filtering.
 1. **Plugins ▸ HoloBio ▸ Real-Time DHM** (or **Real-Time DLHM**).
 2. In **Capture**, choose *Camera* (then **Refresh**) or *Video* (then **Browse…**).
 3. Set the values in **Optics**, then press **Start**.
-4. Video sources get a transport bar under the views — play, pause and scrub.
-5. **Record** captures the selected product (phase, amplitude, or hologram) to an MP4.
+4. **Record** captures the selected product (phase, amplitude, or hologram) to an MP4.
    **Record complex fields** saves every reconstructed field until you stop, as one
-   NumPy `.npz` (`frame_00000`, `frame_00001`, …).
-6. **Snap to Fiji** sends the current view to a normal Fiji window.
-7. With a camera running on Windows, a **Camera** section appears under Capture with
+   NumPy `.npz` (`frame_00000`, `frame_00001`, …). CAN BE HEAVY
+5. **Snap to Fiji** sends the current view to a normal Fiji window so you can apply Fiji tools to it.
+6. With a camera running on Windows, a **Camera** section appears under Capture with
    **Exposure** (and *Auto*) and **Gain**. It starts from whatever the camera currently
    holds and changes nothing until you move a control. Settings are stored by the camera
    driver, not by HoloBio.
 
-### Complex fields
-
-```python
-import numpy as np
-field = np.load("complex_field.npy")        # complex64, shape (rows, cols)
-frames = np.load("fields.npz")              # frames["frame_00000"], ...
-```
-
-To open a `.npy` field in Fiji, run `tools/Open_Complex_NPY.ijm` (**Plugins ▸ Macros ▸
-Run…**) and pick the file: it opens *Real*, *Imag* and *Amplitude* images.
 
 ## Project layout
 
@@ -100,9 +88,7 @@ Run…**) and pick the file: it opens *Real*, *Imag* and *Amplitude* images.
 |------|---------|
 | `src/` | Java source and `plugins.config` (the menu definition) |
 | `lib/` | Third-party JARs needed to build and to run the camera backends |
-| `build.ps1` / `build.bat` | Compile, self-check, and install into Fiji |
-| `bench/` | Benchmark and parity harnesses (dev only; generated fixtures are gitignored) |
-| `tools/` | `Open_Complex_NPY.ijm` (open saved fields in Fiji) and Python parity scripts |
+| `build.ps1` / `build.bat` | Auto compile, self-check, and install into Fiji |
 | `HoloBio_.jar` | Pre-built plugin |
 
 ## Third-party
