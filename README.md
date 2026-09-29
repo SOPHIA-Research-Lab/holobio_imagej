@@ -76,10 +76,10 @@ menu: phase profiles and speckle
    **Record complex fields** saves every reconstructed field until you stop, as one
    NumPy `.npz` (`frame_00000`, `frame_00001`, …). CAN BE HEAVY
 5. **Snap to Fiji** sends the current view to a normal Fiji window so you can apply Fiji tools to it.
-6. With a camera running on Windows, a **Camera** section appears under Capture with
+6. With a camera running  a **Camera** section appears under Capture with
    **Exposure** (and *Auto*) and **Gain**. It starts from whatever the camera currently
    holds and changes nothing until you move a control. Settings are stored by the camera
-   driver, not by HoloBio.
+   driver, not by HoloBio. ONLY WORKS IN WINDOWS
 
 
 ## Project layout
