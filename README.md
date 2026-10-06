@@ -8,7 +8,7 @@ reference implementations (`pyDHM_methods`, `phaseShifting`, `parallel_rc`).
 
 ## Modules
 
-The plugin installs four commands under **Plugins ▸ HoloBio**:
+The plugin installs four modules under **Plugins ▸ HoloBio**:
 
 | Command | What it does |
 |---|---|
@@ -29,30 +29,14 @@ menu: phase profiles and speckle
 
 ## Install
 
-### Option A — pre-built JAR
+### Pre-built JAR
 
 1. Download `HoloBio_.jar` from this repository.
 2. Copy it into your Fiji plugins folder:
    - **Windows:** `Fiji.app\plugins\HoloBio_.jar`
    - **macOS / Linux:** `Fiji.app/plugins/HoloBio_.jar`
 3. For the real-time camera modules, also copy `lib/webcam-capture-0.3.12.jar` and
-   `lib/bridj-0.7.0.jar` into `Fiji.app/jars/`. (Camera exposure / gain uses JNA, which
-   Fiji already ships.)
-4. Restart Fiji.
-
-### Option B — build from source (Windows)
-
-1. Open `build.ps1` and set `$FijiDir` to your Fiji folder, and `$Javac` / `$Jar` /
-   `$IjJar` to match the JDK and `ij-*.jar` versions your Fiji ships.
-2. Run:
-   ```powershell
-   .\build.ps1
-   ```
-   (or double-click `build.bat`)
-3. The script compiles `src/`, bundles the jcobyla classes, runs a self-check, then
-   installs `HoloBio_.jar` into `Fiji.app\plugins\`, copies the webcam runtime JARs into
-   `Fiji.app\jars\`, and installs `HoloBio-core.jar` there so the QPI and Speckle dialogs
-   resolve on Fiji's application class loader.
+   `lib/bridj-0.7.0.jar` into `Fiji.app/jars/`. 
 4. Restart Fiji.
 
 ## Use
@@ -79,8 +63,7 @@ menu: phase profiles and speckle
 6. With a camera running  a **Camera** section appears under Capture with
    **Exposure** (and *Auto*) and **Gain**. It starts from whatever the camera currently
    holds and changes nothing until you move a control. Settings are stored by the camera
-   driver, not by HoloBio. ONLY WORKS IN WINDOWS
-
+   driver, not by HoloBio. IN PLUGIN GAIN AND EXPOSURE LIVE CONFIG ONLY WORKS IN WINDOWS
 
 ## Project layout
 
@@ -99,4 +82,21 @@ menu: phase profiles and speckle
 
 ---
 
-Nancy Burgos, 2026
+### Extra: Adding your own code and fast compiling (Windows)
+
+If you want to add your own functions and don't want to build and copy paste the .jar into Fiji everytime, you can use the build.bat or build.ps1 scripts for fast builts.
+
+0. Add whatever code you want to .java files under /src
+1. Open `build.ps1` and set `$FijiDir` to your Fiji folder, and `$Javac` / `$Jar` /
+   `$IjJar` to match the JDK and `ij-*.jar` versions your Fiji ships.
+2. Run:
+   ```powershell
+   .\build.ps1
+   ```
+   (or double-click `build.bat`)
+3. The script compiles `src/`, bundles the jcobyla classes, runs a self-check, then
+   installs `HoloBio_.jar` into `Fiji.app\plugins\`, copies the webcam runtime JARs into
+   `Fiji.app\jars\`, and installs `HoloBio-core.jar`. It will print every step and tell you if it was successful
+4. Restart Fiji.
+   
+Nancy Burgos, 2026. Contact me: ncburgosb@eafit.edu.co
