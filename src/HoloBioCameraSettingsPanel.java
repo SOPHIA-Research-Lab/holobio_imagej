@@ -16,20 +16,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Live exposure and gain for the camera feeding a real-time module.
+ * Live exposure and gain for the camera.
  *
- * <p>Behaviour, deliberately simple:
+ * <p>Behaviour:
  * <ul>
  *   <li><b>Attach</b> reads whatever the camera currently holds and shows it. Nothing is
- *       written until the user moves a control — opening HoloBio never changes a camera.</li>
+ *       written until the user moves a control, opening HoloBio never changes a camera.</li>
  *   <li>Values are read back after every change and the label shows the camera's value,
- *       not the requested one: devices clamp and round.</li>
+ *       not the requested one</li>
  *   <li>Settings live in the camera driver, not in HoloBio. Closing the window leaves them as
- *       they are, exactly like any other camera app.</li>
+ *       they are</li>
  *   <li>If the camera disappears, the next change fails, the controls disable, and the
- *       status line says so; nothing is retried in the background.</li>
+ *       status line says so. nothing is retried in the background.</li>
  * </ul>
- * Hidden entirely when the platform has no DirectShow or the device exposes neither setting.
+ * Hidden entirely when the platform has no DirectShow or the device exposes neither setting. TODO: linux implementation? 
  */
 public final class HoloBioCameraSettingsPanel extends JPanel {
 

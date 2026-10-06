@@ -123,10 +123,12 @@ public final class HoloBioRtRecorder {
     public String save(File out, double fps) throws IOException {
         List<byte[]> snapshot;
         int w, h;
+        Target t;
         synchronized (this) {
             if (frames.isEmpty()) throw new IOException("Nothing recorded.");
             snapshot = new ArrayList<>(frames);
             w = width; h = height;
+            t = target;
         }
         double rate = fps > 0.1 ? fps : 10.0;
 
@@ -142,8 +144,10 @@ public final class HoloBioRtRecorder {
             writeTiffStack(out, snapshot, w, h);
             return snapshot.size() + " frames → TIFF stack";
         }
-        writeVideo(out, snapshot, w, h, rate);
-        return String.format(Locale.US, "%d frames at %.1f fps", snapshot.size(), rate);
+        boolean lossless = t == Target.HOLOGRAM;
+        writeVideo(out, snapshot, w, h, rate, lossless);
+        return String.format(Locale.US, "%d frames at %.1f fps%s", snapshot.size(), rate,
+                lossless ? ", lossless" : "");
     }
 
     private static void writeTiffStack(File out, List<byte[]> frames, int w, int h) {
@@ -158,22 +162,38 @@ public final class HoloBioRtRecorder {
     /**
      * Pipe raw 8-bit frames into FFmpeg. It is already required for video input, so recording
      * adds no new dependency.
+     *
+     * <p>{@code lossless} is for holograms. Ordinary H.264 (CRF 23, 4:2:0) is fine to watch but
+     * discards exactly the fine fringes a hologram is made of: a USAF hologram pushed through
+     * it no longer reconstructs, while the lossless encode does. Lossless files are ~25× larger
+     * and are meant to be re-processed (HoloBio Video input, Fiji, FFmpeg, VLC) — some
+     * built-in players will not play them.
      */
-    private static void writeVideo(File out, List<byte[]> frames, int w, int h, double fps)
-            throws IOException {
+    private static void writeVideo(File out, List<byte[]> frames, int w, int h, double fps,
+                                   boolean lossless) throws IOException {
         boolean avi = out.getName().toLowerCase(Locale.US).endsWith(".avi");
-        ProcessBuilder pb = new ProcessBuilder(
+        List<String> cmd = new ArrayList<>(java.util.Arrays.asList(
                 "ffmpeg", "-y",
                 "-f", "rawvideo", "-pix_fmt", "gray",
                 "-s", w + "x" + h,
                 "-r", String.format(Locale.US, "%.4f", fps),
                 "-i", "pipe:0",
-                "-an",
-                // yuv420p halves chroma resolution, so both axes must be even
-                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                "-c:v", avi ? "mpeg4" : "libx264",
-                "-pix_fmt", "yuv420p",
-                out.getAbsolutePath());
+                "-an"));
+        if (lossless) {
+            // Grey stays grey and every pixel is kept bit-for-bit.
+            cmd.addAll(avi
+                    ? java.util.Arrays.asList("-c:v", "ffv1", "-pix_fmt", "gray")
+                    : java.util.Arrays.asList("-c:v", "libx264", "-qp", "0", "-preset", "veryfast",
+                                              "-pix_fmt", "gray"));
+        } else {
+            // yuv420p halves chroma resolution, so both axes must be even
+            cmd.addAll(java.util.Arrays.asList(
+                    "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                    "-c:v", avi ? "mpeg4" : "libx264",
+                    "-pix_fmt", "yuv420p"));
+        }
+        cmd.add(out.getAbsolutePath());
+        ProcessBuilder pb = new ProcessBuilder(cmd);
 
         Process proc;
         try {

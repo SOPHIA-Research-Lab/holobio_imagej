@@ -1,8 +1,8 @@
 /**
 
- * Row–column radix-2 complex FFT for rectangular grids (M rows × N columns).
+ * Row–column complex FFT for rectangular grids (M rows × N columns), any size:
 
- * Both M and N must be powers of two. Indexing: row i, column j → {@code i * N + j}.
+ * radix-2 for power-of-two lengths, Bluestein otherwise. Indexing: row i, column j → {@code i * N + j}.
 
  * <p>
 

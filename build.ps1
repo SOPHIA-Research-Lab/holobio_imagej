@@ -10,6 +10,7 @@ $CobylaJar   = Join-Path $Root 'lib\jcobyla-1.4.jar'
 $WebcamJar   = Join-Path $Root 'lib\webcam-capture-0.3.12.jar'
 $BridjJar    = Join-Path $Root 'lib\bridj-0.7.0.jar'
 $JnaJar      = Join-Path $FijiDir 'jars\jna-5.14.0.jar'  # ships with Fiji; compile-time only
+$JamaJar     = Join-Path $FijiDir 'jars\jama-1.0.3.jar'    # ships with Fiji; compile-time only
 $SrcDir = Join-Path $Root 'src'
 $BuildDir = Join-Path $Root 'build'
 $OutJar = Join-Path $Root 'HoloBio_.jar'
@@ -30,7 +31,7 @@ if (-not $sources) {
     Write-Error ('No .java files under ' + $SrcDir)
 }
 $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-& $Javac -encoding UTF-8 -cp "$IjJar;$CobylaJar;$WebcamJar;$BridjJar;$JnaJar" -d $BuildDir @sources
+& $Javac -encoding UTF-8 -cp "$IjJar;$CobylaJar;$WebcamJar;$BridjJar;$JnaJar;$JamaJar" -d $BuildDir @sources
 $javacExit = $LASTEXITCODE
 $ErrorActionPreference = $prev
 if ($javacExit -ne 0) { Write-Error 'Compilation failed.' }

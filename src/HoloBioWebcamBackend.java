@@ -133,6 +133,17 @@ public class HoloBioWebcamBackend implements HoloBioCameraBackend {
      * Used by {@link HoloBioCameraTestWindow} device selector.
      */
     public synchronized void connectIndex(int index) throws Exception {
+        connectIndex(index, null);
+    }
+
+    /**
+     * Open webcam {@code index} at {@code size}, or at the library default when null.
+     *
+     * <p>Sarxos opens at a small standard size (often 640×480) unless told otherwise, even on a
+     * 1280×960 sensor. For holography that is not cosmetic: the camera skips or bins pixels,
+     * the fringes alias, and the +1 order disappears. Callers should pass the sensor's mode.
+     */
+    public synchronized void connectIndex(int index, Dimension size) throws Exception {
         if (webcam != null && webcam.isOpen()) {
             webcam.close();
             webcam = null;
@@ -140,6 +151,10 @@ public class HoloBioWebcamBackend implements HoloBioCameraBackend {
         List<Webcam> cams = Webcam.getWebcams(2000);
         if (cams.isEmpty()) throw new Exception("No webcams found.");
         webcam = cams.get(Math.min(index, cams.size() - 1));
+        if (size != null) {
+            webcam.setCustomViewSizes(size);   // sarxos only accepts sizes it was told about
+            webcam.setViewSize(size);
+        }
         webcam.open();
     }
 

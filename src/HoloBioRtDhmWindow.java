@@ -43,12 +43,15 @@ public class HoloBioRtDhmWindow extends JFrame {
     // ── Source controls ───────────────────────────────────────────────────────
     private JRadioButton      rbCamera, rbVideo;
     private JComboBox<String> cbCamera;
+    private final JComboBox<String> cbResolution = new JComboBox<>();
     private JButton           btnRefresh, btnBrowse;
     private JLabel            lblVideoName;
     private File              videoFile;
 
     // ── Physical parameters ───────────────────────────────────────────────────
     private JTextField tfWavelength, tfPixelX, tfPixelY, tfMagnification;
+    /** Live intensity histogram of the raw hologram, under Optics. */
+    private final HoloBioRtHistogram histogram = new HoloBioRtHistogram();
 
     // ── Viewports and their selectors ─────────────────────────────────────────
     private HoloBioRtDisplayPanel pnlLeft, pnlRight;
@@ -241,6 +244,12 @@ public class HoloBioRtDhmWindow extends JFrame {
         cbCamera.setMaximumRowCount(6);
         sizeControl(cbCamera);
         p.add(cbCamera, c); c.gridy++;
+        cbCamera.addActionListener(e -> {
+            if (cbCamera.getSelectedItem() != null) {
+                HoloBioCameraModes.populate(cbResolution, (String) cbCamera.getSelectedItem());
+            }
+        });
+        p.add(HoloBioCameraModes.row(cbResolution), c); c.gridy++;
 
         btnRefresh = HoloBioUiStyle.secondaryButton("Refresh");
         btnRefresh.setToolTipText("Rescan connected cameras");
@@ -258,6 +267,8 @@ public class HoloBioRtDhmWindow extends JFrame {
         c.gridwidth = 1;
         tfStopAfterSec = new JTextField("0", 6);
         tfStopAfterSec.setToolTipText("0 = play to the end. Otherwise stop once video time reaches this many seconds.");
+        HoloBioRtUtil.liveField(tfStopAfterSec, "Stop after", "s", HoloBioRtUtil.Rule.NON_NEGATIVE,
+                null, this::setStatus);
         HoloBioUiStyle.addLabelField(p, c, "Stop after (s)", tfStopAfterSec,
             HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
 
@@ -388,22 +399,26 @@ public class HoloBioRtDhmWindow extends JFrame {
         tfWavelength = new JTextField("0.633", 6);
         tfPixelX = new JTextField("3.75", 6);
         tfPixelY = new JTextField("3.75", 6);
-        tfMagnification = new JTextField(HoloBioUiStyle.formatMag(40.0), 6);
+        tfMagnification = new JTextField("", 6);
         tfWavelength.setToolTipText("Illumination wavelength in micrometres, e.g. 0.633.");
         tfPixelX.setToolTipText("Sensor pixel size X in micrometres. Do not divide by M.");
         tfPixelY.setToolTipText("Sensor pixel size Y in micrometres. Do not divide by M.");
         tfMagnification.setToolTipText(
                 "Objective magnification M. Object-plane scale: µm/px = pitch / M. "
-                + "Only affects the live profile X axis.");
+                + "Only affects the live profile X axis; leave empty for sensor-plane µm.");
 
+        // Short centred boxes leave the caption column room for "Lateral magnification (M)".
+        for (JTextField tf : new JTextField[] { tfWavelength, tfPixelX, tfPixelY, tfMagnification }) {
+            tf.setHorizontalAlignment(JTextField.CENTER);
+        }
         HoloBioUiStyle.addLabelField(p, c, "λ (µm)", tfWavelength,
-            HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
+            HoloBioUiStyle.FORM_LABEL_W, HoloBioUiStyle.FORM_FIELD_W_OPTICS);
         HoloBioUiStyle.addLabelField(p, c, "Pitch X (µm)", tfPixelX,
-            HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
+            HoloBioUiStyle.FORM_LABEL_W, HoloBioUiStyle.FORM_FIELD_W_OPTICS);
         HoloBioUiStyle.addLabelField(p, c, "Pitch Y (µm)", tfPixelY,
-            HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
+            HoloBioUiStyle.FORM_LABEL_W, HoloBioUiStyle.FORM_FIELD_W_OPTICS);
         HoloBioUiStyle.addLabelField(p, c, HoloBioUiStyle.MAG_LABEL, tfMagnification,
-            HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
+            HoloBioUiStyle.FORM_LABEL_W, HoloBioUiStyle.FORM_FIELD_W_OPTICS);
 
         javax.swing.event.DocumentListener scaleListener = new javax.swing.event.DocumentListener() {
             private void refresh() { refreshProfilesFromCache(); }
@@ -414,6 +429,19 @@ public class HoloBioRtDhmWindow extends JFrame {
         tfMagnification.getDocument().addDocumentListener(scaleListener);
         tfPixelX.getDocument().addDocumentListener(scaleListener);
         tfPixelY.getDocument().addDocumentListener(scaleListener);
+
+        HoloBioRtUtil.liveField(tfWavelength, "λ", "µm", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfPixelX, "Pitch X", "µm", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfPixelY, "Pitch Y", "µm", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfMagnification, "Magnification", "×", HoloBioRtUtil.Rule.POSITIVE,
+                "profile axis in sensor-plane µm (M = 1).", this::setStatus);
+
+        c.gridx = 0;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(HoloBioUiStyle.SPACE_2, 0, 0, 0);
+        p.add(histogram.row(), c);
+        c.gridy++;
         return p;
     }
 
@@ -760,7 +788,7 @@ public class HoloBioRtDhmWindow extends JFrame {
         lastProfileFrame = result;
         lastDxUm = dxUm;
         lastDyUm = dyUm;
-        double mag = Math.max(1e-6, HoloBioRtUtil.parseDouble(tfMagnification, 40.0));
+        double mag = Math.max(1e-6, HoloBioRtUtil.parseDouble(tfMagnification, 1.0));
         // Python QPI: dist = arange(N) * (pixel_size / M)  — not geometric hypot/(N-1)
         final double umPerPx = dxUm / mag;
         java.util.List<HoloBioRtProfileWindow.Curve> csvCurves =
@@ -925,6 +953,9 @@ public class HoloBioRtDhmWindow extends JFrame {
         HoloBioUiStyle.sizeField(cbFtView, HoloBioUiStyle.FORM_COMBO_W);
         HoloBioUiStyle.sizeField(cbFtShape, HoloBioUiStyle.FORM_COMBO_W);
         HoloBioUiStyle.sizeField(tfFtFactor, HoloBioUiStyle.FORM_FIELD_W_SM);
+        HoloBioRtUtil.liveField(tfFtFactor, "Factor", "", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfFtRadius, "Filter radius", "px", HoloBioRtUtil.Rule.NON_NEGATIVE,
+                "radius is automatic (distance / Factor).", this::setStatus);
         HoloBioUiStyle.sizeField(tfFtRadius, HoloBioUiStyle.FORM_FIELD_W_SM);
 
         lblFilter = HoloBioUiStyle.fieldLabel("Filter: auto");
@@ -1036,6 +1067,7 @@ public class HoloBioRtDhmWindow extends JFrame {
     private void updateSourceState() {
         boolean isCamera = rbCamera.isSelected();
         cbCamera    .setEnabled(isCamera);
+        cbResolution.setEnabled(isCamera);
         btnRefresh  .setEnabled(isCamera);
         btnBrowse   .setEnabled(!isCamera);
         lblVideoName.setEnabled(!isCamera);
@@ -1092,7 +1124,8 @@ public class HoloBioRtDhmWindow extends JFrame {
             int idx = Math.max(0, cbCamera.getSelectedIndex());
             setStatus("Connecting to camera " + idx + "…");
             try {
-                source = HoloBioRtFrameSource.camera(webcam, idx);
+                source = HoloBioRtFrameSource.camera(webcam, idx,
+                        HoloBioCameraModes.parse(cbResolution.getSelectedItem()));
             } catch (Exception ex) {
                 setStatus("Camera error: " + ex.getMessage());
                 btnStart.setEnabled(true);
@@ -1245,6 +1278,7 @@ public class HoloBioRtDhmWindow extends JFrame {
                 float[] buf;
                 synchronized (frameLock) { buf = spareGray; spareGray = null; }
                 float[] gray = HoloBioRtUtil.toGray(frame, buf);
+                histogram.sample(gray, w, h);
 
                 if (!showFourier) {
                     BufferedImage img = HoloBioRtUtil.grayImage(gray, w, h);
@@ -1391,6 +1425,7 @@ public class HoloBioRtDhmWindow extends JFrame {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
+                if (!running) break;   // Stop interrupted a parallel FFT pass: not an error
                 e.printStackTrace();
                 setStatus("Frame error: " + e.getMessage());
             }

@@ -139,7 +139,132 @@ public final class HoloBioRtUtil {
 
     public static double parseDouble(JTextField tf, double fallback) {
         if (tf == null) return fallback;
-        return parseDouble(tf.getText(), fallback);
+        Double v = tryParse(tf.getText());
+        if (v != null) return v;
+        // A field under liveField() keeps working with its last valid value while the user
+        // is mid-edit or has typed something invalid, instead of snapping to the default.
+        Object last = tf.getClientProperty(LAST_GOOD);
+        return last instanceof Double ? (Double) last : fallback;
+    }
+
+    /** Same leniency as {@link #parseDouble(String, double)}, but null when not a number. */
+    public static Double tryParse(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        if (s.length() > 1 && (s.endsWith("x") || s.endsWith("X"))) {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        s = s.replace(',', '.');
+        try {
+            double d = Double.parseDouble(s);
+            return Double.isFinite(d) ? d : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Which values {@link #liveField} accepts. */
+    public enum Rule { POSITIVE, NON_NEGATIVE, ANY }
+
+    private static final String LAST_GOOD = "holobio.lastGood";
+    private static final String IN_ERROR  = "holobio.inError";
+    private static final java.awt.Color APPLIED_BG = new java.awt.Color(0xDDF0E3);
+
+    /**
+     * Make a parameter field say when it has taken effect. The real-time loops re-read their
+     * fields on every frame, so an edit applies from the next frame — but silently, and a
+     * typo used to fall back to the default with no sign at all. With this:
+     * <ul>
+     *   <li>an invalid entry turns the border red at once, and the pipeline keeps the last
+     *       valid value (see {@link #parseDouble(JTextField, double)});</li>
+     *   <li>shortly after typing stops, a valid new value flashes the field green and the
+     *       status line names it ("λ set to 0.532 µm — applied from the next frame").</li>
+     * </ul>
+     *
+     * @param emptyNote non-null when an empty field is allowed; said in the status line
+     */
+    public static void liveField(JTextField tf, String name, String unit, Rule rule,
+                                 String emptyNote, java.util.function.Consumer<String> status) {
+        Double init = tryParse(tf.getText());
+        if (init != null) tf.putClientProperty(LAST_GOOD, init);
+        final String[] confirmed = { tf.getText().trim() };
+        final String tip = tf.getToolTipText();
+        final String u = unit == null || unit.isEmpty() ? "" : " " + unit;
+
+        javax.swing.Timer settle = new javax.swing.Timer(600, null);
+        settle.setRepeats(false);
+        settle.addActionListener(e -> {
+            String text = tf.getText().trim();
+            if (text.equals(confirmed[0])) return;
+            if (Boolean.TRUE.equals(tf.getClientProperty(IN_ERROR))) {
+                Object last = tf.getClientProperty(LAST_GOOD);
+                status.accept(String.format(java.util.Locale.US, "%s: “%s” is not valid%s",
+                        name, text, last instanceof Double
+                                ? " — still using " + fmt((Double) last) + u + "." : "."));
+                return;
+            }
+            confirmed[0] = text;
+            status.accept(text.isEmpty()
+                    ? name + " cleared — " + emptyNote
+                    : name + " set to " + fmt(tryParse(text)) + u + " — applied from the next frame.");
+            flash(tf);
+        });
+
+        javax.swing.event.DocumentListener check = new javax.swing.event.DocumentListener() {
+            private void changed() {
+                String text = tf.getText().trim();
+                Double v = tryParse(text);
+                boolean ok = text.isEmpty() ? emptyNote != null
+                        : v != null && (rule == Rule.ANY
+                            || (rule == Rule.POSITIVE ? v > 0 : v >= 0));
+                if (ok && v != null) tf.putClientProperty(LAST_GOOD, v);
+                tf.putClientProperty(IN_ERROR, !ok);
+                tf.setBorder(ok && !tf.hasFocus() ? HoloBioUiStyle.fieldBorder(false)
+                        : ok ? focusBorder() : HoloBioUiStyle.fieldBorder(true));
+                tf.setToolTipText(ok ? tip : (rule == Rule.POSITIVE ? "Enter a number greater than 0."
+                        : rule == Rule.NON_NEGATIVE ? "Enter 0 or a positive number." : "Enter a number."));
+                settle.restart();
+            }
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+        };
+        tf.getDocument().addDocumentListener(check);
+        // The style's focus handler resets the border on focus changes; keep the error visible.
+        tf.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override public void focusLost(java.awt.event.FocusEvent e) {
+                if (Boolean.TRUE.equals(tf.getClientProperty(IN_ERROR))) {
+                    tf.setBorder(HoloBioUiStyle.fieldBorder(true));
+                }
+            }
+            @Override public void focusGained(java.awt.event.FocusEvent e) {
+                if (Boolean.TRUE.equals(tf.getClientProperty(IN_ERROR))) {
+                    tf.setBorder(HoloBioUiStyle.fieldBorder(true));
+                }
+            }
+        });
+        tf.addActionListener(e -> settle.restart());   // Enter confirms without waiting
+    }
+
+    private static javax.swing.border.Border focusBorder() {
+        return javax.swing.BorderFactory.createCompoundBorder(
+                javax.swing.BorderFactory.createLineBorder(HoloBioUiStyle.BORDER_FOCUS, 1),
+                javax.swing.BorderFactory.createEmptyBorder(2, 6, 2, 6));
+    }
+
+    private static void flash(JTextField tf) {
+        tf.setBackground(APPLIED_BG);
+        javax.swing.Timer back = new javax.swing.Timer(900, e -> tf.setBackground(
+                tf.hasFocus() ? HoloBioUiStyle.FIELD_FOCUS_BG : HoloBioUiStyle.FIELD_BG));
+        back.setRepeats(false);
+        back.start();
+    }
+
+    private static String fmt(Double v) {
+        if (v == null) return "?";
+        return new java.math.BigDecimal(v).round(new java.math.MathContext(6))
+                .stripTrailingZeros().toPlainString();
     }
 
     /**

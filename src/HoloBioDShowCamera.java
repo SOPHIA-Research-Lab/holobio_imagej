@@ -17,10 +17,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Live camera settings (exposure, gain, …) through Windows DirectShow, with no extra
- * dependencies: JNA ships with Fiji, and the two interfaces used here — {@code IAMCameraControl}
- * (exposure) and {@code IAMVideoProcAmp} (gain) — are the standard ones every UVC
- * webcam and DirectShow-driven scientific camera (The Imaging Source included) implements.
+ * Live camera settings (exposure, gain) through Windows DirectShow, with no extra
+ * dependenciesJNA SHIPS WITH FIJI and the two interfaces used here — {@code IAMCameraControl}
+ * (exposure) and {@code IAMVideoProcAmp} (gain) are the standard ones every UVC
+ * webcam and DirectShow-driven scientific camera (The Imaging Source included) implements, )IN THEORY, TODO: experiment
  *
  * <p>Settings are device-level, so they apply to the live stream opened by the webcam
  * backend; this class only opens a second, non-streaming handle to the same device.
@@ -87,6 +87,8 @@ public final class HoloBioDShowCamera {
 
         int CoInitializeEx(Pointer reserved, int coInit);
         int CoCreateInstance(Guid clsid, Pointer outer, int ctx, Guid iid, PointerByReference out);
+
+        void CoTaskMemFree(Pointer p);
     }
 
     public interface OleAut32 extends Library {
@@ -124,6 +126,9 @@ public final class HoloBioDShowCamera {
     private static final Guid IID_IBaseFilter          = new Guid("56a86895-0ad4-11ce-b03a-0020af0ba770");
     private static final Guid IID_IAMCameraControl     = new Guid("C6E13370-30AC-11d0-A18C-00A0C9118956");
     private static final Guid IID_IAMVideoProcAmp      = new Guid("C6E13360-30AC-11d0-A18C-00A0C9118956");
+    private static final Guid IID_IAMStreamConfig      = new Guid("C6E13340-30AC-11d0-A18C-00A0C9118956");
+    private static final Guid FORMAT_VideoInfo         = new Guid("05589f80-c356-11ce-bf01-00aa0055595a");
+    private static final Guid FORMAT_VideoInfo2        = new Guid("f72a76a0-eb0a-11d0-ace4-0000c04fc5c3");
 
     private static final int CLSCTX_INPROC_SERVER = 1;
     private static final int COINIT_APARTMENTTHREADED = 2;
@@ -319,7 +324,7 @@ public final class HoloBioDShowCamera {
 
     /**
      * Set a manual value, or hand control back to the camera with {@code auto}. Returns the
-     * state the device reports afterwards — cameras clamp and round, so show this, not the
+     * state the device reports afterwardsshow this, not the
      * requested value.
      */
     public Range set(Prop p, int value, boolean auto) throws Exception {
@@ -335,6 +340,96 @@ public final class HoloBioDShowCamera {
             return null;
         });
         return range(p);
+    }
+
+    /**
+     * Frame sizes the device's capture pin offers, largest first, without duplicates (one size
+     * usually appears once per pixel format). Empty when the driver does not report them.
+     *
+     * <p>Read through {@code IAMStreamConfig::GetStreamCaps} on the first output pin. Layouts
+     * are the x64 ones: {@code AM_MEDIA_TYPE.formattype} at 44, {@code cbFormat} at 72,
+     * {@code pbFormat} at 80; {@code biWidth/biHeight} at 52/56 in {@code VIDEOINFOHEADER}
+     * and 76/80 in {@code VIDEOINFOHEADER2}.
+     */
+    public List<java.awt.Dimension> modes() throws Exception {
+        return onCom(() -> {
+            List<java.awt.Dimension> out = new ArrayList<>();
+            if (filter == null) return out;
+            PointerByReference pinsRef = new PointerByReference();
+            if (call(filter, 10, pinsRef) != 0 || pinsRef.getValue() == null) return out; // EnumPins
+            Pointer pins = pinsRef.getValue();
+            try {
+                PointerByReference pinRef = new PointerByReference();
+                while (out.isEmpty() && call(pins, 3, 1, pinRef, null) == 0) {        // Next
+                    Pointer pin = pinRef.getValue();
+                    try {
+                        IntByReference dir = new IntByReference();
+                        if (call(pin, 9, dir) != 0 || dir.getValue() != 1) continue;  // output only
+                        Pointer cfg = query(pin, IID_IAMStreamConfig);
+                        if (cfg == null) continue;
+                        try {
+                            readModes(cfg, out);
+                        } finally {
+                            release(cfg);
+                        }
+                    } finally {
+                        release(pin);
+                    }
+                }
+            } finally {
+                release(pins);
+            }
+            out.sort((a, b) -> Long.compare((long) b.width * b.height, (long) a.width * a.height));
+            return out;
+        });
+    }
+
+    private static void readModes(Pointer cfg, List<java.awt.Dimension> out) {
+        IntByReference count = new IntByReference(), size = new IntByReference();
+        if (call(cfg, 5, count, size) != 0) return;                       // GetNumberOfCapabilities
+        Memory scc = new Memory(Math.max(256, size.getValue()));
+        for (int i = 0; i < count.getValue(); i++) {
+            PointerByReference mtRef = new PointerByReference();
+            if (call(cfg, 6, i, mtRef, scc) != 0 || mtRef.getValue() == null) continue; // GetStreamCaps
+            Pointer mt = mtRef.getValue();
+            try {
+                Pointer fmt = mt.getPointer(80);
+                int cb = mt.getInt(72);
+                int wOff = -1;
+                if (fmt != null && guidAt(mt, 44, FORMAT_VideoInfo) && cb >= 88) wOff = 52;
+                else if (fmt != null && guidAt(mt, 44, FORMAT_VideoInfo2) && cb >= 112) wOff = 76;
+                if (wOff > 0) {
+                    int w = fmt.getInt(wOff);
+                    int h = Math.abs(fmt.getInt(wOff + 4));   // negative height = top-down DIB
+                    java.awt.Dimension d = new java.awt.Dimension(w, h);
+                    if (w > 0 && h > 0 && !out.contains(d)) out.add(d);
+                }
+            } finally {
+                Pointer fmt = mt.getPointer(80);
+                if (fmt != null) Ole32.INSTANCE.CoTaskMemFree(fmt);
+                Pointer unk = mt.getPointer(64);
+                if (unk != null) release(unk);
+                Ole32.INSTANCE.CoTaskMemFree(mt);
+            }
+        }
+    }
+
+    private static boolean guidAt(Pointer p, long offset, Guid g) {
+        return Arrays.equals(p.getByteArray(offset, 16), g.getPointer().getByteArray(0, 16));
+    }
+
+    /** Frame sizes for the device matching {@code hint}; empty if unknown or unavailable. */
+    public static List<java.awt.Dimension> listModes(String hint) {
+        if (!isSupported()) return new ArrayList<>();
+        HoloBioDShowCamera cam = null;
+        try {
+            cam = open(hint);
+            return cam == null ? new ArrayList<>() : cam.modes();
+        } catch (Throwable t) {
+            return new ArrayList<>();
+        } finally {
+            if (cam != null) cam.close();
+        }
     }
 
     public void close() {
@@ -356,6 +451,9 @@ public final class HoloBioDShowCamera {
         for (String d : listDevices()) {
             System.out.println("device: " + d);
             HoloBioDShowCamera c = open(d);
+            StringBuilder m = new StringBuilder();
+            for (java.awt.Dimension dm : c.modes()) m.append(' ').append(dm.width).append('x').append(dm.height);
+            System.out.println("   Resolutions:" + (m.length() == 0 ? " (not reported)" : m));
             for (Prop p : Prop.values()) {
                 Range r = c.range(p);
                 System.out.println("   " + (r == null ? p.label + ": not supported" : r));

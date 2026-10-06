@@ -24,12 +24,14 @@ import java.util.List;
 public class HoloBioRtDlhmWindow extends JFrame {
 
     private static final String VIEW_HOLOGRAM  = "Hologram";
+    private static final String VIEW_FOURIER   = "Fourier Transform";
     private static final String VIEW_PHASE     = "Phase";
     private static final String VIEW_AMPLITUDE = "Amplitude";
 
     // --- Source ---
     private JRadioButton      rbCamera, rbVideo;
     private JComboBox<String> cbCamera;
+    private final JComboBox<String> cbResolution = new JComboBox<>();
     private JButton           btnRefresh, btnBrowse;
     private JLabel            lblVideoName;
     private File              videoFile;
@@ -88,7 +90,12 @@ public class HoloBioRtDlhmWindow extends JFrame {
     private JLabel                              lblFieldRec;
 
     private volatile boolean showPhase = true;
-    private volatile BufferedImage lastHologram, lastAmplitude, lastPhase;
+    private volatile BufferedImage lastHologram, lastAmplitude, lastPhase, lastFourier;
+    private JRadioButton           rbHologram, rbFourier;
+    /** Live intensity histogram of the raw hologram, under Optics. */
+    private final HoloBioRtHistogram histogram = new HoloBioRtHistogram();
+    private volatile boolean       showFourier;
+    private float[]                ftRe, ftIm;
 
     private final HoloBioWebcamBackend webcam = new HoloBioWebcamBackend();
     private volatile HoloBioRtFrameSource source;
@@ -197,6 +204,12 @@ public class HoloBioRtDlhmWindow extends JFrame {
         cbCamera.setMaximumRowCount(6);
         HoloBioUiStyle.stretchWidth(cbCamera);
         p.add(cbCamera, c); c.gridy++;
+        cbCamera.addActionListener(e -> {
+            if (cbCamera.getSelectedItem() != null) {
+                HoloBioCameraModes.populate(cbResolution, (String) cbCamera.getSelectedItem());
+            }
+        });
+        p.add(HoloBioCameraModes.row(cbResolution), c); c.gridy++;
 
         btnRefresh = HoloBioUiStyle.secondaryButton("Refresh");
         btnRefresh.setToolTipText("Rescan connected cameras");
@@ -236,8 +249,8 @@ public class HoloBioRtDlhmWindow extends JFrame {
         JPanel p = new JPanel(new GridBagLayout());
         p.setBorder(HoloBioUiStyle.sectionPad("Optics"));
 
-        final int lw = HoloBioUiStyle.FORM_LABEL_W_SM;  // caption column
-        final int fw = HoloBioUiStyle.FORM_FIELD_W;     // same as RT DHM
+        final int lw = HoloBioUiStyle.FORM_LABEL_W;     // caption column, same x as RT DHM
+        final int fw = HoloBioUiStyle.FORM_FIELD_W_OPTICS;  // same as RT DHM
         final int uw = HoloBioUiStyle.FORM_FIELD_W;
 
         GridBagConstraints c = new GridBagConstraints();
@@ -303,6 +316,13 @@ public class HoloBioRtDlhmWindow extends JFrame {
         cbFixR.addActionListener(e -> onFixRToggled());
         addOpticsRow(p, c, "", cbFixR, lw, null, null);
 
+        HoloBioRtUtil.liveField(tfWavelength, "λ", "µm", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfPitch, "Pixel pitch", "µm", HoloBioRtUtil.Rule.POSITIVE, null, this::setStatus);
+        // Z may be negative (r > L), so the distances only need to be numbers.
+        HoloBioRtUtil.liveField(tfL, "L", "", HoloBioRtUtil.Rule.ANY, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfZ, "Z", "", HoloBioRtUtil.Rule.ANY, null, this::setStatus);
+        HoloBioRtUtil.liveField(tfR, "r", "", HoloBioRtUtil.Rule.ANY, null, this::setStatus);
+
         addOpticsRule(p, c);
 
         lblMag = readoutLabel("2.00×");
@@ -314,6 +334,15 @@ public class HoloBioRtDlhmWindow extends JFrame {
                 "Lensless in-line reconstruction with radial undistort, matching Python "
                 + "dlhm_rec(). Chosen over Angular Spectrum because AS is only valid while "
                 + "|r|*(L/Z) <= N*pitch^2/lambda, which typical DLHM geometries exceed.");
+
+        c.gridx = 0;
+        c.gridwidth = 3;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(HoloBioUiStyle.SPACE_3, 0, 0, 0);
+        p.add(histogram.row(), c);
+        c.gridwidth = 1;
+        c.fill = GridBagConstraints.NONE;
+        c.gridy++;
 
         params.setAlgorithm("DL");
         refreshMagLabel();
@@ -381,6 +410,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
     private static JTextField numericField(String text, int width) {
         JTextField tf = HoloBioUiStyle.numericField(text);
         HoloBioUiStyle.sizeField(tf, width);
+        tf.setHorizontalAlignment(JTextField.CENTER);
         return tf;
     }
 
@@ -561,10 +591,61 @@ public class HoloBioRtDlhmWindow extends JFrame {
 
     private JPanel buildInputView() {
         pnlLeft = new HoloBioRtDisplayPanel(VIEW_HOLOGRAM);
+
+        rbHologram = new JRadioButton("Hologram", true);
+        rbFourier  = new JRadioButton("FT");
+        rbFourier.setToolTipText("Log-magnitude spectrum of the frame being reconstructed (after binning)");
+        ButtonGroup bg = new ButtonGroup();
+        bg.add(rbHologram); bg.add(rbFourier);
+        rbHologram.addActionListener(e -> onInputViewChanged());
+        rbFourier .addActionListener(e -> onInputViewChanged());
+
+        JPanel head = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, 2);
+        head.add(rbHologram);
+        head.add(rbFourier);
+        head.add(HoloBioUiStyle.infoButton("Fourier transform",
+            "The spectrum of the frame DLHM-rec reconstructs, after binning: "
+            + "normalize(log1p(|FFT|)), as in HoloBio Python.\n\n"
+            + "There are no filter controls here, unlike Real-Time DHM. DLHM is in-line: the "
+            + "reconstruction propagates the whole spectrum, so there is no +1 order to "
+            + "isolate.\n\n"
+            + "Use it to check sampling: concentric rings are the in-line fringes; rings that "
+            + "reach the edge and fold back mean the fringes are finer than the pixels. "
+            + "Reduce binning or move the sample further from the source."));
+
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(HoloBioUiStyle.sectionPad("Input"));
+        wrap.add(head,    BorderLayout.NORTH);
         wrap.add(pnlLeft, BorderLayout.CENTER);
         return wrap;
+    }
+
+    private void onInputViewChanged() {
+        showFourier = rbFourier.isSelected();
+        pnlLeft.setHint(showFourier ? VIEW_FOURIER : VIEW_HOLOGRAM);
+        pnlLeft.setImage(showFourier ? lastFourier : lastHologram);
+    }
+
+    /** normalize(log1p(|fftshift(fft2(frame - mean))|), 255), the offline DLHM FT. */
+    private BufferedImage fourierImage(float[] src, int w, int h) {
+        int n = w * h;
+        if (ftRe == null || ftRe.length != n) { ftRe = new float[n]; ftIm = new float[n]; }
+        double mean = 0;
+        for (int i = 0; i < n; i++) mean += src[i];
+        float m = (float) (mean / n);
+        for (int i = 0; i < n; i++) { ftRe[i] = src[i] - m; ftIm[i] = 0f; }
+        HoloBioRectFft.fft2dForward(ftRe, ftIm, h, w);
+        HoloBioRectFft.fftShift2d(ftRe, ftIm, h, w);
+        float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;
+        for (int i = 0; i < n; i++) {
+            float v = (float) Math.log1p(Math.hypot(ftRe[i], ftIm[i]));
+            ftRe[i] = v;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        float span = hi > lo ? hi - lo : 1f;
+        for (int i = 0; i < n; i++) ftRe[i] = 255f * (ftRe[i] - lo) / span;
+        return HoloBioRtUtil.grayImage(ftRe, w, h);
     }
 
     private JPanel buildOutputView() {
@@ -618,6 +699,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
     private void updateSourceState() {
         boolean isCamera = rbCamera.isSelected();
         cbCamera    .setEnabled(isCamera);
+        cbResolution.setEnabled(isCamera);
         btnRefresh  .setEnabled(isCamera);
         btnBrowse   .setEnabled(!isCamera);
         lblVideoName.setEnabled(!isCamera);
@@ -813,7 +895,8 @@ public class HoloBioRtDlhmWindow extends JFrame {
             int idx = Math.max(0, cbCamera.getSelectedIndex());
             setStatus("Connecting to camera " + idx + "…");
             try {
-                source = HoloBioRtFrameSource.camera(webcam, idx);
+                source = HoloBioRtFrameSource.camera(webcam, idx,
+                        HoloBioCameraModes.parse(cbResolution.getSelectedItem()));
             } catch (Exception ex) {
                 setStatus("Camera error: " + ex.getMessage());
                 btnStart.setEnabled(true);
@@ -944,10 +1027,11 @@ public class HoloBioRtDlhmWindow extends JFrame {
                 float[] buf;
                 synchronized (frameLock) { buf = spareGray; spareGray = null; }
                 float[] gray = HoloBioRtUtil.toGray(frame, buf);
+                histogram.sample(gray, w, h);
 
                 BufferedImage img = HoloBioRtUtil.grayImage(gray, w, h);
                 lastHologram = img;
-                SwingUtilities.invokeLater(() -> pnlLeft.setImage(img));
+                if (!showFourier) SwingUtilities.invokeLater(() -> pnlLeft.setImage(img));
 
                 synchronized (frameLock) {
                     if (readyGray != null) spareGray = readyGray;
@@ -999,6 +1083,12 @@ public class HoloBioRtDlhmWindow extends JFrame {
                     src = binBuf;
                 }
 
+                if (showFourier) {
+                    BufferedImage ft = fourierImage(src, srcW, srcH);
+                    lastFourier = ft;
+                    SwingUtilities.invokeLater(() -> { if (showFourier) pnlLeft.setImage(ft); });
+                }
+
                 HoloBioRtDlhmMath.Frame result =
                         HoloBioRtDlhmMath.process(src, srcH, srcW, params, needAmp, needPhase);
                 captureField();
@@ -1032,6 +1122,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
+                if (!running) break;   // Stop interrupted a parallel FFT pass: not an error
                 setStatus("Frame error: " + e.getMessage());
             }
         }
@@ -1077,7 +1168,8 @@ public class HoloBioRtDlhmWindow extends JFrame {
         BufferedImage out = pnlRight.getImage();
         if (in == null && out == null) { setStatus("No frame ready."); return; }
         if (in != null) {
-            HoloBioFijiUi.showImagePlus(new ImagePlus("RT DLHM — Hologram", toProcessor(in)));
+            HoloBioFijiUi.showImagePlus(new ImagePlus(
+                    showFourier ? "RT DLHM — Fourier Transform" : "RT DLHM — Hologram", toProcessor(in)));
         }
         if (out != null) {
             String title = showPhase ? "RT DLHM — Phase" : "RT DLHM — Amplitude";

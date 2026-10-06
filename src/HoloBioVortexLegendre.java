@@ -501,6 +501,16 @@ final class HoloBioVortexLegendre {
 
         int centerA = Math.round(h / 2f);
         int centerB = Math.round(w / 2f);
+        // The crop is 2·limit wide around the spectrum centre, so it cannot exceed the image:
+        // a 640×480 camera gives a 480² square, and the default limit 256 would read past it.
+        // The DCT unwrapper needs a power-of-two crop, so round the half-size down to one too.
+        int maxLimit = Integer.highestOneBit(Math.max(1,
+                Math.min(Math.min(centerA, h - centerA), Math.min(centerB, w - centerB))));
+        if (limit > maxLimit) {
+            ij.IJ.log(String.format("HoloBio Vortex-Legendre: limit %d exceeds the %d×%d image; using %d.",
+                    limit, w, h, maxLimit));
+            limit = maxLimit;
+        }
         int startA = centerA - limit;
         int endA = centerA + limit;
         int startB = centerB - limit;

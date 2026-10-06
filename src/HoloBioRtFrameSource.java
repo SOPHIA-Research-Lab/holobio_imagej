@@ -52,7 +52,13 @@ public final class HoloBioRtFrameSource implements Closeable {
 
     public static HoloBioRtFrameSource camera(HoloBioWebcamBackend backend, int index)
             throws Exception {
-        backend.connectIndex(index);
+        return camera(backend, index, null);
+    }
+
+    /** @param size capture size from the camera's mode list, or null for the driver default */
+    public static HoloBioRtFrameSource camera(HoloBioWebcamBackend backend, int index,
+                                              java.awt.Dimension size) throws Exception {
+        backend.connectIndex(index, size);
         return new HoloBioRtFrameSource(backend, null, null, false, backend.getNominalFps(30.0), -1,
                 "Camera connected — streaming.");
     }

@@ -84,6 +84,8 @@ public final class HoloBioUiStyle {
     public static final int FORM_FIELD_W = 72;
     /** Short toolbar numbers (factor, r px). */
     public static final int FORM_FIELD_W_SM = 44;
+    /** Optics inputs in the real-time sidebars: short values (0.633, 3.75, 4.5), centred. */
+    public static final int FORM_FIELD_W_OPTICS = 58;
     /** Dropdowns and longer text. */
     public static final int FORM_COMBO_W = 96;
     /** Objective magnification — same wording and two-decimal display everywhere. */

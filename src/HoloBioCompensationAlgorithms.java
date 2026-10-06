@@ -58,12 +58,53 @@ public final class HoloBioCompensationAlgorithms {
         public final ComplexField field;
         public final double fx;
         public final double fy;
+        /** Peak magnitude over the median of the searched region; see {@link #MIN_CARRIER_PROMINENCE}. */
+        public final double prominence;
 
-        private FilteredOrder(ComplexField field, double fx, double fy) {
+        private FilteredOrder(ComplexField field, double fx, double fy, double prominence) {
             this.field = field;
             this.fx = fx;
             this.fy = fy;
+            this.prominence = prominence;
         }
+    }
+
+    /**
+     * Below this, the "+1 order" is not a real off-axis carrier and the reconstruction will be
+     * noise. Calibrated on the sample data: off-axis holograms score 1 274–2 537×, plain images
+     * ~105×, and 640×480 webcam frames whose fringes were lost to downscaling 131–165×.
+     */
+    static final double MIN_CARRIER_PROMINENCE = 400.0;
+
+    /**
+     * Width of the band next to Nyquist excluded from the +1 order search. A real carrier there
+     * would mean fringes ~2 px apart, which no usable hologram has, while camera artefacts
+     * (row/column patterns, compression) put sharp spikes exactly there. Excluding it is a no-op
+     * for any hologram the Python reference handles, and stops those spikes being picked.
+     */
+    static int nyquistMargin(int width, int height) {
+        return Math.max(2, Math.min(width, height) / 32);
+    }
+
+    static boolean nearNyquist(int x, int y, int width, int height, int margin) {
+        return Math.abs(x - width / 2) > width / 2 - margin
+            || Math.abs(y - height / 2) > height / 2 - margin;
+    }
+
+    static void warnIfWeakCarrier(String method, double prominence, int width, int height) {
+        if (prominence >= MIN_CARRIER_PROMINENCE) return;
+        ij.IJ.log(String.format(java.util.Locale.US,
+            "HoloBio %s: no clear off-axis carrier in this %d×%d image (peak %.0f× the background; "
+            + "off-axis holograms are typically > %.0f×). The result will likely be noise. "
+            + "Check that the fringes are resolved: capture at the camera's full resolution.",
+            method, width, height, prominence, MIN_CARRIER_PROMINENCE));
+    }
+
+    private static double median(double[] v, int n) {
+        if (n <= 0) return 0.0;
+        double[] c = Arrays.copyOf(v, n);
+        Arrays.sort(c);
+        return c[n / 2];
     }
 
     /**
@@ -84,9 +125,15 @@ public final class HoloBioCompensationAlgorithms {
         int bx = cx;
         int by = 0;
         int topHalfEnd = height / 2;
+        int margin = nyquistMargin(width, height);
+        double[] searched = new double[width * topHalfEnd];
+        int n = 0;
         for (int y = 0; y < topHalfEnd; y++) {
             for (int x = 0; x < width; x++) {
+                if (nearNyquist(x, y, width, height, margin)) continue;
                 double v = mag[y * width + x];
+                if (v < 0) continue;            // cleared DC block
+                searched[n++] = v;
                 if (v > best) {
                     best = v;
                     bx = x;
@@ -97,6 +144,8 @@ public final class HoloBioCompensationAlgorithms {
         if (best < 0) {
             return new RoiRect(cx - 5, cy - 5, cx + 6, cy + 6);
         }
+        double med = median(searched, n);
+        warnIfWeakCarrier("compensation", med > 0 ? best / med : 0.0, width, height);
         double dist = Math.hypot(by - height / 2.0, bx - width / 2.0);
         int rad = Math.max(1, (int) Math.round(dist / 3.0));
         int x1 = clampInt(bx - rad, 0, width - 1);
@@ -399,7 +448,9 @@ public final class HoloBioCompensationAlgorithms {
      */
     static FilteredOrder spatialFilteringCf(double[] inp, int width, int height) {
         RoiRect upperHalf = new RoiRect(0, 0, width, height / 2);
-        return filterAndExtractOrderCircular(inp, width, height, upperHalf, true);
+        FilteredOrder fo = filterAndExtractOrderCircular(inp, width, height, upperHalf, true);
+        warnIfWeakCarrier("Vortex-Legendre", fo.prominence, width, height);
+        return fo;
     }
 
     private static ComplexField filterAndExtractOrder(double[] inp, int width, int height, RoiRect roi) {
@@ -431,6 +482,7 @@ public final class HoloBioCompensationAlgorithms {
         double[] peak = orderPeakFrequencyFromShiftedSpectrum(spectrum, width, height, roi);
         double fx = peak[0];
         double fy = peak[1];
+        double prominence = peak[2];
         double cx = width / 2.0;
         double cy = height / 2.0;
         double radius = Math.max(1.0, Math.hypot(fy - cy, fx - cx) / 3.0);
@@ -449,7 +501,7 @@ public final class HoloBioCompensationAlgorithms {
             }
         }
         HoloBioRectFft.ifftShift2d(filtered.re, filtered.im, height, width);
-        return new FilteredOrder(ifft2(filtered), fx, fy);
+        return new FilteredOrder(ifft2(filtered), fx, fy, prominence);
     }
 
     private static void zeroDcNeighborhoodInShiftedSpectrum(ComplexField spectrum, int width, int height, int halfWindow) {
@@ -473,10 +525,17 @@ public final class HoloBioCompensationAlgorithms {
         int bestX = width / 2;
         int bestY = height / 2;
         double best = -1.0;
-        for (int y = roi.y1; y < roi.y2; y++) {
-            for (int x = roi.x1; x < roi.x2; x++) {
+        int margin = nyquistMargin(width, height);
+        int y1 = Math.max(0, roi.y1), y2 = Math.min(height, roi.y2);
+        int x1 = Math.max(0, roi.x1), x2 = Math.min(width, roi.x2);
+        double[] searched = new double[Math.max(0, (y2 - y1) * (x2 - x1))];
+        int n = 0;
+        for (int y = y1; y < y2; y++) {
+            for (int x = x1; x < x2; x++) {
+                if (nearNyquist(x, y, width, height, margin)) continue;
                 int i = y * width + x;
                 double v = Math.hypot(shiftedSpectrum.re[i], shiftedSpectrum.im[i]);
+                if (v > 0) searched[n++] = v;   // zeros are the cleared DC block
                 if (v > best) {
                     best = v;
                     bestX = x;
@@ -484,7 +543,8 @@ public final class HoloBioCompensationAlgorithms {
                 }
             }
         }
-        return new double[] {bestX, bestY};
+        double med = median(searched, n);
+        return new double[] {bestX, bestY, med > 0 ? best / med : 0.0};
     }
 
     private static double[] meanRemovedCopy(double[] inp) {
