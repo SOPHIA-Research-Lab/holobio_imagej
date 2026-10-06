@@ -12,7 +12,7 @@ The plugin installs four modules under **Plugins ▸ HoloBio**:
 
 | Command | What it does |
 |---|---|
-| **Offline DHM** | Off-axis DHM on a loaded hologram: phase compensation (ERS / CFS / Vortex–Legendre), phase shifting (SOSR, BPS2/3, PS3/4/5), numerical propagation (angular spectrum / Fresnel) with z-scan and autofocus |
+| **Offline DHM** | Off-axis DHM on a loaded hologram: phase compensation (ERS / CFS / Vortex–Legendre), phase shifting (BPS2/3), numerical propagation (angular spectrum / Fresnel) with z-scan and autofocus |
 | **Offline DLHM** | Lensless in-line reconstruction (angular spectrum, DLHM-rec, Kreuzer) from a hologram plus optional reference |
 | **Real-Time DHM** | Live off-axis reconstruction from a camera or video file, with FT view and filter control, live phase profiles, video recording, complex-field recording, and live camera exposure / gain |
 | **Real-Time DLHM** | Live lensless reconstruction from a camera or video file, with video recording, complex-field recording, and live camera exposure / gain |
