@@ -84,7 +84,9 @@ final class HoloBioWeightedPhaseUnwrap {
             if (k == 0) {
                 System.arraycopy(zk, 0, pk, 0, n);
             } else {
-                double beta = rkzksum / Math.max(1e-30, rkzkPrev);
+                // Q and the DCT preconditioner are both negative definite (discrete Laplacian),
+                // so rᵀz and pᵀQp are negative: guard their magnitude, never clamp the sign.
+                double beta = Math.abs(rkzkPrev) > 1e-30 ? rkzksum / rkzkPrev : 0.0;
                 for (int i = 0; i < n; i++) {
                     pk[i] = zk[i] + beta * pk[i];
                 }
@@ -92,7 +94,7 @@ final class HoloBioWeightedPhaseUnwrap {
             rkzkPrev = rkzksum;
             applyQ(qpk, pk, wwx, wwy, width, height, ws);
             double denom = dot(pk, qpk);
-            double alpha = denom > 1e-30 ? rkzksum / denom : 0.0;
+            double alpha = Math.abs(denom) > 1e-30 ? rkzksum / denom : 0.0;
             for (int i = 0; i < n; i++) {
                 phi[i] += alpha * pk[i];
                 rk[i] -= alpha * qpk[i];

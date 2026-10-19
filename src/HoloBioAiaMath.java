@@ -12,6 +12,43 @@ public final class HoloBioAiaMath {
     private HoloBioAiaMath() {
     }
 
+    /** MATLAB default starting shifts: 0.1*(0:1/(n-1):1). */
+    public static double[] rampGuess(int n) {
+        double[] shifts = new double[n];
+        for (int k = 0; k < n; k++) {
+            shifts[k] = 0.1 * k / (n - 1);
+        }
+        return shifts;
+    }
+
+    /**
+     * Custom starting shifts (rad): one number = constant step (0, s, 2s, ...),
+     * or one value per image separated by commas / spaces.
+     */
+    public static double[] parseGuess(String text, int n) {
+        String[] parts = text.trim().split("[,;\\s]+");
+        double[] values = new double[parts.length];
+        try {
+            for (int i = 0; i < parts.length; i++) {
+                values[i] = Double.parseDouble(parts[i]);
+            }
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Custom initial guess must be numbers in radians: " + text);
+        }
+        if (values.length == 1) {
+            double[] shifts = new double[n];
+            for (int k = 0; k < n; k++) {
+                shifts[k] = k * values[0];
+            }
+            return shifts;
+        }
+        if (values.length != n) {
+            throw new IllegalArgumentException("Custom initial guess has " + values.length + " values for " + n
+                + " images. Give one value per image, or a single step.");
+        }
+        return values;
+    }
+
     public interface Progress {
         void iteration(int iteration, int maxIterations, double error);
     }
@@ -55,7 +92,8 @@ public final class HoloBioAiaMath {
 
     /**
      * MATLAB GetPhaseAdvancedIterativeAlgorithm: alternate step 1 (shifts -> phase) and
-     * step 2 (phase -> shifts) until the shifts stop changing.
+     * step 2 (phase -> shifts) until the shifts stop changing: the change drops below
+     * precision, or stops getting smaller (it has reached the rounding-error floor).
      * initialShifts: starting guess (rad), one per image; null = start from the PCA phase.
      */
     public static Result run(Matrix fringesVector, double[] initialShifts, int maxIterations,
@@ -78,6 +116,7 @@ public final class HoloBioAiaMath {
         Fit s2 = null;
         int it = 0;
         double err = Double.NaN;
+        double prevErr = Double.POSITIVE_INFINITY;
         while (it < maxIterations) {
             it++;
             s1 = step1(shifts, fringesVector);
@@ -87,9 +126,10 @@ public final class HoloBioAiaMath {
             if (progress != null) {
                 progress.iteration(it, maxIterations, err);
             }
-            if (err < precision) {
+            if (err < precision || err >= prevErr) {
                 break;
             }
+            prevErr = err;
         }
 
         double[] rel = new double[nImages];
@@ -98,6 +138,16 @@ public final class HoloBioAiaMath {
         }
         return new Result(toFloat(s1.phase), toFloat(s1.background), toFloat(s1.modulation), rel,
             s2.background, s2.modulation, it, err);
+    }
+
+    /**
+     * AIAStep1 only: phase, background and modulation for known shifts, e.g. object shifts
+     * after subtracting a reference. Per-image background/modulation are not computed (null).
+     */
+    public static Result fromShifts(Matrix fringesVector, double[] shifts) {
+        Fit s1 = step1(shifts, fringesVector);
+        return new Result(toFloat(s1.phase), toFloat(s1.background), toFloat(s1.modulation),
+            shifts.clone(), null, null, 0, 0);
     }
 
     private static double shiftChange(double[] prev, double[] cur) {

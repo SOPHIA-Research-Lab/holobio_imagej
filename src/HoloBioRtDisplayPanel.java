@@ -70,8 +70,14 @@ public final class HoloBioRtDisplayPanel extends JPanel {
         void onClear();
     }
 
+    /** One click on the image, in image pixel coordinates; arrives on the event thread. */
+    public interface PointPickListener {
+        void onPoint(double x, double y);
+    }
+
     private volatile BufferedImage image;
     private volatile String        hint;
+    private PointPickListener      pointListener;
 
     // ── Line capture state ──────────────────────────────────────────────────
     private volatile java.util.List<ProfileLine> lines = java.util.Collections.emptyList();
@@ -102,6 +108,19 @@ public final class HoloBioRtDisplayPanel extends JPanel {
                 zoomAt(e.getX(), e.getY(), e.getPreciseWheelRotation() < 0);
             }
             @Override public void mousePressed(MouseEvent e) {
+                if (pointListener != null && javax.swing.SwingUtilities.isLeftMouseButton(e)) {
+                    BufferedImage img = image;
+                    if (img != null) {
+                        double ix = (e.getX() - curOx) / curScale;
+                        double iy = (e.getY() - curOy) / curScale;
+                        if (ix >= 0 && iy >= 0 && ix < img.getWidth() && iy < img.getHeight()) {
+                            PointPickListener l = pointListener;
+                            setPointPick(null);           // one click per arming
+                            l.onPoint(ix, iy);
+                        }
+                    }
+                    return;
+                }
                 if (captureArmed && javax.swing.SwingUtilities.isRightMouseButton(e)) {
                     if (captureListener != null) captureListener.onClear();
                     return;
@@ -174,6 +193,17 @@ public final class HoloBioRtDisplayPanel extends JPanel {
         setCursor(armed ? java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.CROSSHAIR_CURSOR)
                         : java.awt.Cursor.getDefaultCursor());
         repaint();
+    }
+
+    /**
+     * Arm a single-click pick ({@code listener} non-null) or disarm it (null). The next left
+     * click inside the image reports its image coordinates and disarms the pick.
+     */
+    public void setPointPick(PointPickListener listener) {
+        pointListener = listener;
+        setCursor(listener != null || captureArmed
+                ? java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.CROSSHAIR_CURSOR)
+                : java.awt.Cursor.getDefaultCursor());
     }
 
     public void setCaptureRectMode(boolean rectMode) {

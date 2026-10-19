@@ -3,7 +3,7 @@ import java.util.Arrays;
 /**
  * Real-time DHM reconstruction — off-axis sideband demodulation.
  *
- * <p>One forward FFT serves both products. Per frame:
+ * One forward FFT serves both products. Per frame:
  * <ol>
  *   <li>Fit the frame onto a power-of-two grid and fill the unused margin with the frame mean.
  *       Because a constant over the whole grid transforms to a single DC spike, mean-filling
@@ -14,25 +14,35 @@ import java.util.Arrays;
  *   <li>FT display: magnitude → resample to the frame aspect → optional log1p → /max → 0…255.
  *       Matches HoloBio Python {@code _fourier_display_from_hologram}.</li>
  *   <li>Circular mask isolates the +1 diffraction order (auto-detected once, or user-supplied).</li>
- *   <li>IFFT, then cancel the off-axis carrier with a fitted ramp, leaving the object field.</li>
+ *   <li>IFFT, then Vortex–Legendre compensation:
+ *       <ol>
+ *         <li><b>Vortex:</b> Python {@code vortex_compensation} (shared with Offline DHM) places
+ *             the carrier to sub-pixel accuracy from the phase vortex of the Hilbert-transformed
+ *             log spectrum, 55× interpolated around the peak;</li>
+ *         <li><b>reference wave</b> from that carrier, exp(−i·2π·Δ·m/M) — Python's
+ *             exp(i·k·dx·sinθ·m) with the arcsin, λ and dx cancelled;</li>
+ *         <li><b>Legendre</b> (Vortex Legendre mode only): orders 2–6 fitted on a ±128 spectral
+ *             crop and removed at full resolution, as the EAFIT MATLAB live tool, with the
+ *             reliability-sorted unwrap Python uses — see {@link HoloBioLegendreLive}.</li>
+ *       </ol></li>
  *   <li>amplitude = |field|, phase = angle(field); only the requested one is evaluated.</li>
  * </ol>
  *
- * <p><b>On the carrier fit.</b> Python builds a reference wave from the peak bin as
- * exp(i·k·dx·sinθx·m) with sinθx = (fx0 − fxmax)·λ/(M·dx). The arcsin and sin cancel, as do λ
- * and dx, so that wave is exactly exp(i·2π·Δ·m/M) for a bin offset Δ — purely geometric, with
- * the physical parameters playing no part. Its weakness is that Δ is an integer: the true
- * carrier lies between bins, and a residual of one bin leaves a full 2π of tilt across the
- * field. Amplitude cannot see that, but phase <em>is</em> that tilt, so the phase map comes out
- * as diagonal fringes. Python patches this with {@code vortex_compensation}, interpolating the
- * spectrum 55× around the peak to place the carrier to sub-pixel accuracy.
- *
- * <p>This implementation fits the carrier from the field instead of the spectrum. Summing
- * neighbour·conj(centre) over the field and taking the argument gives the amplitude-weighted
- * circular mean of the per-pixel phase step, which is the carrier in radians per pixel — a
- * continuous estimate with no interpolation and no search, weighted towards bright pixels
- * where the phase is trustworthy. Two multiply-accumulates per pixel replace the 55× resampled
- * grid, and the accuracy is limited by noise rather than by any lattice.
+ * <p><b>Where this departs from the reference implementations, and why.</b>
+ * <ul>
+ *   <li>Latency: the vortex search runs when the order is (re)detected — Start, Re-detect, a
+ *       change of mask or grid — and is reused, as Python RT caches its model (MATLAB re-runs
+ *       it per frame); the Legendre fit is refreshed every fourth frame and on detection.</li>
+ *   <li>Latency: power-of-two grid with the margin mean-filled (MATLAB and Python: native size).</li>
+ *   <li>Robustness: the +1 order is found by prominence over the radial falloff rather than
+ *       the brightest bin ({@link #detectSideband}). On the 15 Oct lab recordings the brightest
+ *       bin is a second, weaker-object order; prominence finds the one that reconstructs.</li>
+ *   <li>Robustness: a vortex result more than 1.5 bins from the peak is rejected.</li>
+ *   <li>Robustness: no MATLAB {@code compResidualRamp} (Python RT has none either); it added
+ *       background tilt on lab data.</li>
+ *   <li>Robustness: reliability unwrap in the Legendre fit instead of MATLAB's least squares,
+ *       which left 4–21 rad of false background on lab data.</li>
+ * </ul>
  *
  * <p>All buffers are reused between frames and the class keeps static state, so a single
  * processing thread must own it.
@@ -65,6 +75,14 @@ public final class HoloBioRtDhmMath {
     // costs a full grid scan and buys nothing. Python likewise builds its model once.
     private static boolean sbValid;
     private static int     sbRow, sbCol, sbRadius;
+    /** Vortex-refined carrier (bins from DC, sub-bin), refreshed whenever the order is re-found. */
+    private static boolean vortexValid;
+    private static double  vortexDx, vortexDy;
+
+    /** Legendre coefficients are refitted this often (frames), and on every detection. */
+    private static final int LEGENDRE_REFIT_EVERY = 4;
+    private static int     legendreAge, legendreN;
+    private static boolean legendreFresh;
 
     // ── Carrier-cancelling ramp, refitted each frame ──────────────────────────
     private static float[] rampCosX, rampSinX, rampCosY, rampSinY;
@@ -78,6 +96,11 @@ public final class HoloBioRtDhmMath {
      * circle of radius {@code dist/factor}; the rectangular box is an optional faster cut.
      */
     private static volatile boolean circularMask = true;
+
+    /** Half-size of the spectral crop the Legendre fit uses; MATLAB live default 128. */
+    private static volatile int legendreLimit = HoloBioLegendreLive.DEFAULT_LIMIT;
+
+    public static void setLegendreLimit(int limit) { legendreLimit = Math.max(4, limit); }
 
     public static void setFlattenPhase(boolean on) { flattenPhase = on; }
     public static boolean isFlattenPhase() { return flattenPhase; }
@@ -118,7 +141,7 @@ public final class HoloBioRtDhmMath {
     public static boolean isFtFiltered() { return ftFiltered; }
 
     private static double[] lastFit;
-    /** Coefficients of the last fitted background surface: x, y, x², y², xy. */
+    /** Legendre coefficients (orders 2–6: x, y, (3x²−1)/2, xy, (3y²−1)/2) of the last frame. */
     public static double[] lastBackgroundFit() { return lastFit; }
 
     private HoloBioRtDhmMath() {}
@@ -291,14 +314,18 @@ public final class HoloBioRtDhmMath {
 
         // ── Locate the +1 diffraction order ───────────────────────────────────
         if (filterMode == FILTER_CIRCLE && filterRadius > 0) {
-            sbRow    = wrapIndex(filterCyPad + gRows / 2, gRows);
-            sbCol    = wrapIndex(filterCxPad + gCols / 2, gCols);
+            int row = wrapIndex(filterCyPad + gRows / 2, gRows);
+            int col = wrapIndex(filterCxPad + gCols / 2, gCols);
+            if (row != sbRow || col != sbCol || !sbValid) vortexValid = false;
+            sbRow    = row;
+            sbCol    = col;
             sbRadius = filterRadius;
             sbValid  = true;
         } else {
             if (!sbValid) {
                 detectSideband(re, im, gRows, gCols);
                 sbValid = true;
+                vortexValid = false;
             }
             applyMaskRadius(gRows, gCols);
         }
@@ -343,29 +370,25 @@ public final class HoloBioRtDhmMath {
             ftDisplay = spectrumDisplay(re, im, gRows, gCols, side, side, ftLogScale, true);
         }
 
+        // ── Vortex: sub-pixel carrier from the filtered spectrum ──────────────
+        // Python vortex_compensation (shared with Offline DHM), run when the order is
+        // (re)detected and cached — as Python RT caches its model — not on every frame.
+        if (!vortexValid) {
+            refineCarrierWithVortex(re, im, gRows, gCols);
+            vortexValid = true;
+            legendreFresh = false;     // new carrier → refit the background on this frame
+        }
+
         HoloBioRectFft.ifft2d(re, im, gRows, gCols);
 
-        // ── Carrier, to sub-pixel precision ───────────────────────────────────
-        // Measured off the field itself rather than from the peak bin. See estimateCarrier.
-        double gx = 0, gy = 0;
-        if (wantPhase || wantAmplitude) {
-            double sxRe = 0, sxIm = 0, syRe = 0, syIm = 0;
-            for (int r = 0; r < srcRows - 1; r++) {
-                int base = (r + pad) * gCols + pad, next = base + gCols;
-                for (int c = 0; c < srcCols - 1; c++) {
-                    float ar = re[base + c], ai = im[base + c];
-                    // neighbour · conj(centre), accumulated as a complex sum
-                    float xr = re[base + c + 1], xi = im[base + c + 1];
-                    sxRe += (double) xr * ar + (double) xi * ai;
-                    sxIm += (double) xi * ar - (double) xr * ai;
-                    float yr = re[next + c], yi = im[next + c];
-                    syRe += (double) yr * ar + (double) yi * ai;
-                    syIm += (double) yi * ar - (double) yr * ai;
-                }
-            }
-            if (sxRe * sxRe + sxIm * sxIm > 1e-30) gx = Math.atan2(sxIm, sxRe);
-            if (syRe * syRe + syIm * syIm > 1e-30) gy = Math.atan2(syIm, syRe);
-        }
+        // ── Reference wave from the vortex carrier, in radians per pixel ───────
+        // No residual-ramp step (MATLAB compResidualRamp). Python RT has none, and on lab
+        // holograms it added tilt: the mean neighbour phase step over the filtered field is
+        // dominated by the bright, asymmetric object halo inside the mask, not the background
+        // (15 Oct recordings: 0.3 fringes of background tilt before it, 1.8 after). Residual
+        // tilt is left to the Legendre stage, which fits it on the low-passed background.
+        double gx = 2 * Math.PI * vortexDx / gCols;
+        double gy = 2 * Math.PI * vortexDy / gRows;
         carrierX = gx;
         carrierY = gy;
 
@@ -436,7 +459,23 @@ public final class HoloBioRtDhmMath {
         if (amp != null) stretch(amp, aMin, aMax);
 
         if (phase != null) {
-            if (flattenPhase) removeSmoothBackground(phase, re, im, srcRows, srcCols, gCols, pad);
+            if (flattenPhase) {
+                // MATLAB live Vortex–Legendre: fit orders 2–6 on the ±limit spectral crop of
+                // the demodulated field, remove them at full resolution. The old tilt-only fit
+                // (removeSmoothBackground) left the objective's curvature wrapping across the map.
+                // The fit (one native-size FFT + unwrap, ~90 ms at 960²) is refreshed every
+                // LEGENDRE_REFIT_EVERY frames and on every detection; the polynomial itself is
+                // removed from every frame. MATLAB refits per frame; Python RT fits once per
+                // model refresh. The background drifts slowly, so this sits between the two.
+                if (lastFit == null || !legendreFresh || ++legendreAge >= LEGENDRE_REFIT_EVERY
+                        || legendreN != srcRows) {
+                    lastFit = HoloBioLegendreLive.fit(fieldReBuf, fieldImBuf, srcRows, legendreLimit);
+                    legendreAge = 0;
+                    legendreN = srcRows;
+                    legendreFresh = true;
+                }
+                HoloBioLegendreLive.subtract(phase, srcRows, lastFit);
+            }
 
             // Centre on the *background* circular mean, not the whole field. USAF bars (and
             // any high-φ object) pull a full-field mean up by ~0.2 rad, so subtracting it
@@ -523,67 +562,67 @@ public final class HoloBioRtDhmMath {
         return (float) Math.atan2(cIm, cRe);
     }
 
+    /** Largest move from the peak bin a sub-pixel refinement may make before it is rejected. */
+    private static final double VORTEX_MAX_SHIFT = 1.5;
+
+    /** Whether the last vortex search was accepted (false: the peak bin was used). */
+    private static boolean vortexAccepted;
+    public static boolean vortexAccepted() { return vortexAccepted; }
+
     /**
-     * Subtract residual tilt. Quadratic terms were eating USAF bar contrast and the
-     * mid-line secondary peak that Python QPI (Legendre on a spectral crop) keeps.
-     * Carrier demodulation already removed the main off-axis ramp; this is only the leftover.
+     * Python {@code vortex_compensation} on the masked spectrum: log power, fftshifted, then
+     * the shared vortex search seeded at the strongest bin within ±3 of the detected order.
+     *
+     * <p>A sub-pixel refinement cannot legitimately land more than about a bin from the peak,
+     * so a result further than {@link #VORTEX_MAX_SHIFT} bins is rejected and the peak bin is
+     * kept. Python RT accepts anything within max(radius, 8) bins; on the 15 Oct lab
+     * recordings the search jumped 4.5 bins, which leaves 4.5 fringes of tilt in Vortex mode.
      */
-    private static void removeSmoothBackground(float[] phase, float[] re, float[] im,
-                                               int rows, int cols, int gCols, int pad) {
-        if (rows < 8 || cols < 8) return;
-
-        double sx = 2.0 / (cols - 1), sy = 2.0 / (rows - 1);
-        double m00 = 0, m01 = 0, m11 = 0, r0 = 0, r1 = 0;
-
-        double maxMag2 = 0;
-        for (int r = 0; r < rows; r++) {
-            int si = (r + pad) * gCols + pad;
-            for (int c = 0; c < cols; c++) {
-                float fr = re[si + c], fi = im[si + c];
-                double m2 = (double) fr * fr + (double) fi * fi;
-                if (m2 > maxMag2) maxMag2 = m2;
+    private static void refineCarrierWithVortex(float[] re, float[] im, int gRows, int gCols) {
+        int halfR = gRows / 2, halfC = gCols / 2;
+        double[] logPow = new double[gRows * gCols];
+        for (int r = 0; r < gRows; r++) {
+            int ur = r + halfR; if (ur >= gRows) ur -= gRows;      // shifted row r ← unshifted ur
+            for (int c = 0; c < gCols; c++) {
+                int uc = c + halfC; if (uc >= gCols) uc -= gCols;
+                int i = ur * gCols + uc;
+                double m2 = (double) re[i] * re[i] + (double) im[i] * im[i];
+                logPow[r * gCols + c] = 10.0 * Math.log10(m2 + 1e-6);
             }
         }
-        double minMag2 = 0.01 * maxMag2;
-        if (maxMag2 <= 0) return;
-
-        for (int r = 0; r < rows - 1; r++) {
-            int si = (r + pad) * gCols + pad, di = r * cols;
-            for (int c = 0; c < cols - 1; c++) {
-                int i = si + c, d = di + c;
-                float fr = re[i], fi = im[i];
-                if ((double) fr * fr + (double) fi * fi < minMag2) continue;
-                double gxp = wrapPi(phase[d + 1] - phase[d]) / sx;
-                double gyp = wrapPi(phase[d + cols] - phase[d]) / sy;
-                // ∇(a x + b y) = (a, b) in normalised coords
-                m00 += 1;
-                m01 += 0;
-                m11 += 1;
-                r0 += gxp;
-                r1 += gyp;
+        // Peak bin: the detector scores 3×3 means against the ring, so it can sit a bin or two
+        // off the actual maximum of the order.
+        int sx = sidebandCol(), sy = sidebandRow(), bx = sx, by = sy;
+        double best = Double.NEGATIVE_INFINITY;
+        for (int dy = -3; dy <= 3; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                int r = sy + dy, c = sx + dx;
+                if (r < 0 || c < 0 || r >= gRows || c >= gCols) continue;
+                double v = logPow[r * gCols + c];
+                if (v > best) { best = v; bx = c; by = r; }
             }
         }
-        int n = (int) m00;
-        if (n < 16) return;
-        double a = r0 / m00;
-        double b = r1 / m11;
-        lastFit = new double[] {a, b};
-
-        for (int r = 0; r < rows; r++) {
-            double y = r * sy - 1.0;
-            int d = r * cols;
-            for (int c = 0; c < cols; c++) {
-                double x = c * sx - 1.0;
-                phase[d + c] -= (float) (a * x + b * y);
+        double px = bx, py = by;
+        vortexAccepted = false;
+        try {
+            double[] pos = HoloBioVortexLegendre.vortexCompensation(logPow, gRows, gCols, bx, by);
+            if (Double.isFinite(pos[0]) && Double.isFinite(pos[1])
+                    && Math.abs(pos[0] - bx) <= VORTEX_MAX_SHIFT
+                    && Math.abs(pos[1] - by) <= VORTEX_MAX_SHIFT) {
+                px = pos[0];
+                py = pos[1];
+                vortexAccepted = true;
             }
+        } catch (RuntimeException ex) {
+            // keep the peak bin
         }
+        vortexDx = px - halfC;
+        vortexDy = py - halfR;
     }
 
-    private static double wrapPi(double v) {
-        if (v >  Math.PI) return v - 2 * Math.PI;
-        if (v < -Math.PI) return v + 2 * Math.PI;
-        return v;
-    }
+    /** Vortex-refined carrier offset from DC, in spectrum bins (sub-bin), cached per detection. */
+    public static double vortexCarrierCol() { return vortexDx; }
+    public static double vortexCarrierRow() { return vortexDy; }
 
     /** Fitted carrier in radians per pixel along X, from the last processed frame. */
     public static double carrierX() { return carrierX; }

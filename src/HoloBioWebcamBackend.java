@@ -151,6 +151,9 @@ public class HoloBioWebcamBackend implements HoloBioCameraBackend {
         List<Webcam> cams = Webcam.getWebcams(2000);
         if (cams.isEmpty()) throw new Exception("No webcams found.");
         webcam = cams.get(Math.min(index, cams.size() - 1));
+        // Sarxos hands every caller the same Webcam object per device, so the other real-time
+        // window may still hold it open; a size can only be set on a closed device.
+        if (webcam.isOpen()) webcam.close();
         if (size != null) {
             webcam.setCustomViewSizes(size);   // sarxos only accepts sizes it was told about
             webcam.setViewSize(size);

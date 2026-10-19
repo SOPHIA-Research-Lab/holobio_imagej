@@ -677,6 +677,38 @@ public final class HoloBioUiStyle {
         t.start();
     }
 
+    /**
+     * Like {@link #runBusy}, but {@code work} runs off the UI thread so Fiji's progress bar and
+     * status line keep updating. {@code done} then runs on the UI thread; the button stays
+     * disabled until it finishes.
+     */
+    public static void runBusyInBackground(final JButton btn, final String busyText,
+                                           final Runnable work, final Runnable done) {
+        final String orig = btn.getText();
+        btn.setEnabled(false);
+        if (busyText != null && !busyText.isEmpty()) {
+            btn.setText(busyText);
+        }
+        Thread t = new Thread(() -> {
+            try {
+                work.run();
+            } finally {
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        if (done != null) {
+                            done.run();
+                        }
+                    } finally {
+                        btn.setText(orig);
+                        btn.setEnabled(true);
+                    }
+                });
+            }
+        }, "HoloBio-busy");
+        t.setDaemon(true);
+        t.start();
+    }
+
     /** Label + shrinking slider + numeric field + Set — fields never clip. */
     public static JPanel sliderFieldRow(String label, JSlider slider, JTextField field, JButton setBtn) {
         JPanel row = new JPanel(new GridBagLayout());

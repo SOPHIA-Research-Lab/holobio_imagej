@@ -23,6 +23,7 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
+import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
@@ -49,6 +50,18 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private static final int FORM_LABEL_W = HoloBioUiStyle.FORM_LABEL_W;
     private static final int FORM_FIELD_W = HoloBioUiStyle.FORM_FIELD_W;
     private static final int FORM_COMBO_W = HoloBioUiStyle.FORM_COMBO_W;
+    private static final int WINDOW_MAX_H = 680;
+
+    private static final String AIA_METHOD = "AIA";
+    private static final String AIA_GUESS_PCA = "PCA";
+    private static final String AIA_GUESS_RAMP = "Linear ramp";
+    private static final String AIA_GUESS_CUSTOM = "Custom";
+    private static final String SRC_STACK = "Active stack";
+    private static final String SRC_OPEN_STACK = "Open stack";
+    private static final String SRC_FOLDER = "Folder";
+    /** Fixed AIA settings, same as the validated MATLAB script (readInterferogramsV2.m). */
+    private static final double AIA_NORM_RADIUS = 5;
+    private static final double AIA_PRECISION = 1e-15;
 
     private final HoloBioDhmState state = new HoloBioDhmState();
     private final HoloBioDhmParams params = new HoloBioDhmParams();
@@ -111,6 +124,24 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private JRadioButton rbPcMethodTu;
     private JRadioButton rbPcMethodVl;
     private JComboBox<String> phaseShiftMethodBox;
+    /** AIA options, shown only when Method = AIA. */
+    private JPanel aiaOptions;
+    private JComboBox<String> aiaGuessBox;
+    private JTextField tfAiaCustomGuess;
+    private JTextField tfAiaMaxIter;
+    private JCheckBox cbAiaReference;
+    private JPanel aiaRefRows;
+    private JComboBox<String> aiaRefSourceBox;
+    private JComboBox<String> aiaRefStackBox;
+    private JPanel aiaRefStackRow;
+    private JPanel aiaRefFolderRows;
+    private JTextField tfAiaRefFolder;
+    private JTextField tfAiaRefFilter;
+    /** Where phase-shifting frames come from (active stack or a folder). */
+    private JComboBox<String> psSourceBox;
+    private JPanel psFolderRows;
+    private JTextField tfPsFolder;
+    private JTextField tfPsFilter;
     /** Propagation algorithm choice (Angular / Fresnel) — only on the Numerical Propagation card. */
     private JComboBox<String> npPropagationMethodBox;
     private JCheckBox cbPsAutoPropagate;
@@ -150,7 +181,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         frame.add(buildBottomBar(), BorderLayout.SOUTH);
 
         HoloBioUiStyle.polish(frame);
-        HoloBioUiStyle.packTight(frame, 0, 500, 720);
+        packWindow(frame);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
     }
@@ -181,9 +212,17 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private JPanel buildCenterPanel() {
         JPanel center = new JPanel(new BorderLayout(0, 0));
-        JPanel left = buildParametersPanel();
-        center.add(left, BorderLayout.CENTER);
+        // Scrolls when a tall card (e.g. AIA with folder + reference) exceeds the window height cap.
+        JScrollPane scroll = new JScrollPane(buildParametersPanel(),
+            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        HoloBioUiStyle.styleScroll(scroll);
+        center.add(scroll, BorderLayout.CENTER);
         return center;
+    }
+
+    /** Fit the window to its content, at most 500 × WINDOW_MAX_H (taller cards scroll). */
+    private static void packWindow(java.awt.Window w) {
+        HoloBioUiStyle.packTight(w, 0, 500, WINDOW_MAX_H, HoloBioUiStyle.SPACE_1);
     }
 
     private JPanel buildParametersPanel() {
@@ -199,9 +238,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         moduleGroup.add(rbModulePhaseComp);
         moduleGroup.add(rbModulePhaseShift);
         moduleGroup.add(rbModuleNumericalProp);
-        methodSelector.add(HoloBioUiStyle.choiceGrid(2,
-            rbModulePhaseComp, rbModulePhaseShift,
-            rbModuleNumericalProp, null), BorderLayout.WEST);
+        methodSelector.add(HoloBioUiStyle.choiceGrid(3,
+            rbModulePhaseComp, rbModulePhaseShift, rbModuleNumericalProp), BorderLayout.WEST);
 
         left.add(methodSelector, BorderLayout.NORTH);
 
@@ -224,7 +262,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         moduleCards.revalidate();
         java.awt.Window w = SwingUtilities.getWindowAncestor(moduleCards);
         if (w != null) {
-            HoloBioUiStyle.packTight(w, 0, 500, 720);
+            packWindow(w);
         }
     }
 
@@ -302,7 +340,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         JButton openSettingsButton = HoloBioUiStyle.gearButton(
             "Search size, grid, and Vortex–Legendre options.",
             e -> open_compensation_settings());
-        methodPanel.add(HoloBioUiStyle.choiceGrid(2,
+        methodPanel.add(HoloBioUiStyle.choiceGrid(4,
             HoloBioUiStyle.radioWithInfo(rbPcMethodSemi, "Semi-Heuristic",
                 "ERS search that recentres the first-order carrier in the Fourier plane."),
             HoloBioUiStyle.radioWithInfo(rbPcMethodTu, "Tu-DHM",
@@ -357,14 +395,103 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
         JPanel methodRow = new JPanel();
         methodRow.setLayout(new BoxLayout(methodRow, BoxLayout.Y_AXIS));
-        phaseShiftMethodBox = new JComboBox<>(new String[] {"BPS3", "BPS2"});
+        phaseShiftMethodBox = new JComboBox<>(new String[] {"BPS3", "BPS2", AIA_METHOD});
         phaseShiftMethodBox.setLightWeightPopupEnabled(false);
         setFixedControlSize(phaseShiftMethodBox, FORM_COMBO_W);
         phaseShiftMethodBox.addActionListener(e -> update_shifting_params());
         methodRow.add(compactRow("Method:", phaseShiftMethodBox));
-        methodRow.add(compactInfoRow("Frames source:", "Uses active image stack."));
+        psSourceBox = new JComboBox<>(new String[] {SRC_STACK, SRC_FOLDER});
+        psSourceBox.setLightWeightPopupEnabled(false);
+        setFixedControlSize(psSourceBox, FORM_COMBO_W);
+        psSourceBox.setToolTipText("Active stack: the linked image stack. Folder: images in a folder, sorted by name.");
+        psSourceBox.addActionListener(e -> syncPhaseShiftRows());
+        methodRow.add(compactRow("Frames source:", psSourceBox));
+        tfPsFolder = new JTextField("", FIELD_COLS);
+        tfPsFilter = new JTextField("", FIELD_COLS);
+        psFolderRows = folderRows(tfPsFolder, tfPsFilter);
+        methodRow.add(psFolderRows);
         methodRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(methodRow);
+
+        aiaOptions = new JPanel();
+        aiaOptions.setLayout(new BoxLayout(aiaOptions, BoxLayout.Y_AXIS));
+        aiaOptions.setBorder(HoloBioUiStyle.sectionPad("AIA options"));
+        aiaOptions.setAlignmentX(Component.LEFT_ALIGNMENT);
+        aiaGuessBox = new JComboBox<>(new String[] {AIA_GUESS_PCA, AIA_GUESS_RAMP, AIA_GUESS_CUSTOM});
+        aiaGuessBox.setLightWeightPopupEnabled(false);
+        setFixedControlSize(aiaGuessBox, FORM_COMBO_W);
+        aiaGuessBox.setToolTipText("Starting phase shifts for the iteration.");
+        aiaGuessBox.addActionListener(e -> syncAiaGuessField());
+        JPanel guessRow = compactRow("Initial guess:", aiaGuessBox);
+        guessRow.add(HoloBioUiStyle.infoButton("Initial guess",
+            "PCA: estimates the starting phase from the frames (recommended).\n"
+            + "Linear ramp: small shifts 0 to 0.1 rad, the MATLAB default.\n"
+            + "Custom: type the starting shifts in radians, either one number (the step between\n"
+            + "frames, e.g. 1.5708 = π/2) or one value per frame separated by commas.\n\n"
+            + "AIA cannot tell a result from its mirror image (phase and shifts with the opposite\n"
+            + "sign); the initial guess decides which of the two you get."));
+        aiaOptions.add(guessRow);
+        tfAiaCustomGuess = new JTextField("1.5708", FIELD_COLS);
+        setFixedControlSize(tfAiaCustomGuess, FORM_COMBO_W);
+        HoloBioUiStyle.styleField(tfAiaCustomGuess);
+        tfAiaCustomGuess.setToolTipText("One step for all frames, or one shift per frame separated by commas (rad).");
+        aiaOptions.add(compactRow("Custom guess (rad):", tfAiaCustomGuess));
+        tfAiaMaxIter = new JTextField("100", FIELD_COLS);
+        setFixedControlSize(tfAiaMaxIter, FORM_FIELD_W);
+        HoloBioUiStyle.styleField(tfAiaMaxIter);
+        tfAiaMaxIter.setToolTipText("Upper limit; AIA stops earlier once the shifts stop changing.");
+        aiaOptions.add(compactRow("Max iterations:", tfAiaMaxIter));
+
+        cbAiaReference = new JCheckBox("Subtract reference", false);
+        cbAiaReference.setToolTipText("Remove phase shifts caused by external movement, measured on a reference set.");
+        cbAiaReference.addActionListener(e -> syncPhaseShiftRows());
+        JPanel refToggleRow = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_1);
+        refToggleRow.add(cbAiaReference);
+        refToggleRow.add(HoloBioUiStyle.infoButton("Subtract reference",
+            "Runs AIA on a reference set (same number of frames, recorded at the same time\n"
+            + "without the sample effect) and subtracts its phase shifts, i.e. the external\n"
+            + "movement, from the object's shifts before computing the object phase.\n\n"
+            + "Unchecked: the reference shifts are 0, so the result does not change."));
+        refToggleRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, HoloBioUiStyle.CONTROL_H + HoloBioUiStyle.SPACE_2));
+        refToggleRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        aiaOptions.add(refToggleRow);
+
+        aiaRefRows = new JPanel();
+        aiaRefRows.setLayout(new BoxLayout(aiaRefRows, BoxLayout.Y_AXIS));
+        aiaRefRows.setAlignmentX(Component.LEFT_ALIGNMENT);
+        aiaRefSourceBox = new JComboBox<>(new String[] {SRC_OPEN_STACK, SRC_FOLDER});
+        aiaRefSourceBox.setLightWeightPopupEnabled(false);
+        setFixedControlSize(aiaRefSourceBox, FORM_COMBO_W);
+        aiaRefSourceBox.addActionListener(e -> syncPhaseShiftRows());
+        aiaRefRows.add(compactRow("Reference source:", aiaRefSourceBox));
+        aiaRefStackBox = new JComboBox<>();
+        aiaRefStackBox.setLightWeightPopupEnabled(false);
+        setFixedControlSize(aiaRefStackBox, FORM_COMBO_W);
+        aiaRefStackBox.setToolTipText("Open image stack with the reference frames.");
+        aiaRefStackBox.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            @Override
+            public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
+                refreshReferenceStacks();
+            }
+
+            @Override
+            public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {
+            }
+
+            @Override
+            public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {
+            }
+        });
+        aiaRefStackRow = compactRow("Reference stack:", aiaRefStackBox);
+        aiaRefRows.add(aiaRefStackRow);
+        tfAiaRefFolder = new JTextField("", FIELD_COLS);
+        tfAiaRefFilter = new JTextField("", FIELD_COLS);
+        aiaRefFolderRows = folderRows(tfAiaRefFolder, tfAiaRefFilter);
+        aiaRefRows.add(aiaRefFolderRows);
+        aiaOptions.add(aiaRefRows);
+
+        syncAiaGuessField();
+        form.add(aiaOptions);
 
         JPanel psParams = new JPanel();
         psParams.setLayout(new BoxLayout(psParams, BoxLayout.Y_AXIS));
@@ -399,6 +526,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         stack.add(form);
         stack.add(propOptionsPs.root);
         panel.add(stack, BorderLayout.NORTH);
+        syncPhaseShiftRows();
         return panel;
     }
 
@@ -492,7 +620,13 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
         openOutputsButton.addActionListener(e -> openAllOutputsInFiji());
         saveButton.addActionListener(e -> onSave());
-        btnApply.addActionListener(e -> HoloBioUiStyle.runBusy(btnApply, "Working…", this::onApplyMvp));
+        btnApply.addActionListener(e -> {
+            if (isAiaSelected()) {
+                startAiaRun();
+            } else {
+                HoloBioUiStyle.runBusy(btnApply, "Working…", this::onApplyMvp);
+            }
+        });
         resetButton.addActionListener(e -> onReset());
 
         return HoloBioUiStyle.buildActionBar(
@@ -916,6 +1050,82 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         String method = (String) phaseShiftMethodBox.getSelectedItem();
         debugLog("Phase shifting method selected: " + method);
         IJ.showStatus("HoloBio: Phase shifting method -> " + method);
+        syncPhaseShiftRows();
+    }
+
+    /** Show only the rows that apply to the current method / source / reference choices. */
+    private void syncPhaseShiftRows() {
+        if (aiaOptions == null || psFolderRows == null) {
+            return;
+        }
+        psFolderRows.setVisible(SRC_FOLDER.equals(psSourceBox.getSelectedItem()));
+        aiaOptions.setVisible(AIA_METHOD.equals(phaseShiftMethodBox.getSelectedItem()));
+        boolean ref = cbAiaReference.isSelected();
+        boolean refFolder = SRC_FOLDER.equals(aiaRefSourceBox.getSelectedItem());
+        aiaRefRows.setVisible(ref);
+        aiaRefStackRow.setVisible(!refFolder);
+        aiaRefFolderRows.setVisible(refFolder);
+        if (ref && !refFolder) {
+            refreshReferenceStacks();
+        }
+        aiaOptions.revalidate();
+        psFolderRows.revalidate();
+        java.awt.Window w = SwingUtilities.getWindowAncestor(aiaOptions);
+        if (w != null) {
+            packWindow(w);
+        }
+    }
+
+    /** Fill the reference-stack dropdown with the open images, keeping the current pick. */
+    private void refreshReferenceStacks() {
+        Object current = aiaRefStackBox.getSelectedItem();
+        aiaRefStackBox.removeAllItems();
+        String[] titles = WindowManager.getImageTitles();
+        for (String t : titles) {
+            aiaRefStackBox.addItem(t);
+        }
+        if (current != null) {
+            aiaRefStackBox.setSelectedItem(current);
+        }
+    }
+
+    /** "Folder:" field + Browse… button, and "Filename contains:" field. */
+    private JPanel folderRows(JTextField folderField, JTextField filterField) {
+        JPanel rows = new JPanel();
+        rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
+        rows.setAlignmentX(Component.LEFT_ALIGNMENT);
+        setFixedControlSize(folderField, FORM_COMBO_W);
+        HoloBioUiStyle.styleField(folderField);
+        folderField.setToolTipText("Folder with the frames (images are sorted by name).");
+        JPanel folderRow = compactRow("Folder:", folderField);
+        JButton browse = HoloBioUiStyle.compactButton("Browse…");
+        browse.addActionListener(e -> {
+            javax.swing.JFileChooser fc = new javax.swing.JFileChooser(folderField.getText().trim());
+            fc.setFileSelectionMode(javax.swing.JFileChooser.DIRECTORIES_ONLY);
+            if (fc.showOpenDialog(SwingUtilities.getWindowAncestor(browse))
+                    == javax.swing.JFileChooser.APPROVE_OPTION) {
+                folderField.setText(fc.getSelectedFile().getPath());
+                folderField.setToolTipText(fc.getSelectedFile().getPath());
+            }
+        });
+        folderRow.add(browse);
+        rows.add(folderRow);
+        setFixedControlSize(filterField, FORM_COMBO_W);
+        HoloBioUiStyle.styleField(filterField);
+        filterField.setToolTipText("Only files whose name contains this text, e.g. _2_UP. Empty = all images.");
+        rows.add(compactRow("Filename contains:", filterField));
+        JPanel hintRow = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, 0);
+        hintRow.add(Box.createHorizontalStrut(FORM_LABEL_W));
+        hintRow.add(HoloBioUiStyle.footerNote("⚠ AIA uses every matching image in the folder."));
+        hintRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, HoloBioUiStyle.CONTROL_H));
+        hintRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        rows.add(hintRow);
+        return rows;
+    }
+
+    /** Custom guess field is only editable when Initial guess = Custom. */
+    private void syncAiaGuessField() {
+        tfAiaCustomGuess.setEnabled(AIA_GUESS_CUSTOM.equals(aiaGuessBox.getSelectedItem()));
     }
 
     // ---------------- Shared execution entrypoints ----------------
@@ -1077,7 +1287,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 requiredFrames = 2;
                 break;
             default:
-                HoloBioFijiUi.message("HoloBio", "Unsupported phase shifting method (use BPS3 or BPS2).");
+                HoloBioFijiUi.message("HoloBio", "Unsupported phase shifting method (use BPS3, BPS2 or AIA).");
                 return;
         }
 
@@ -1096,7 +1306,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         if (ps == null) {
             return;
         }
+        applyPhaseShiftResult(ps, method);
+    }
 
+    private void applyPhaseShiftResult(HoloBioPhaseShifting.Result ps, String method) {
         setCurrentFieldFromImageSize(ps.re, ps.im, ps.width, ps.height);
         if (cbPsAutoPropagate != null && cbPsAutoPropagate.isSelected()) {
             _propagate_current_field(propOptionsPs, "Angular Spectrum");
@@ -1106,6 +1319,295 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
         update_right_view();
         IJ.showStatus("HoloBio: Phase shifting run completed (" + method + ").");
+    }
+
+    private boolean isAiaSelected() {
+        return isModulePhaseShift() && AIA_METHOD.equals(phaseShiftMethodBox.getSelectedItem());
+    }
+
+    /** AIA settings read from the panel on the UI thread, so the run itself can go to the background. */
+    private static final class AiaJob {
+        boolean folder;
+        String dir;
+        String filter;
+        ImagePlus stack;
+        int maxIter;
+        Object guess;
+        String customGuess;
+        boolean useRef;
+        boolean refFolder;
+        String refDir;
+        String refFilter;
+        ImagePlus refStack;
+    }
+
+    /** What the background run hands back: the field, plus the shifts for the plot. */
+    private static final class AiaOutput {
+        HoloBioPhaseShifting.Result field;
+        double[] objectShifts;
+        double[] referenceShifts;   // null when no reference
+        double[] correctedShifts;
+        List<String> names;         // file names (folder source), else null
+    }
+
+    /** Apply in AIA mode: runs in the background so the progress bar updates. */
+    private void startAiaRun() {
+        if (!readParamsFromPhaseShiftPanel()) {
+            return;
+        }
+        AiaJob job = readAiaJob();
+        if (job == null) {
+            return;
+        }
+        final AiaOutput[] out = new AiaOutput[1];
+        HoloBioUiStyle.runBusyInBackground(btnApply, "Working…", () -> out[0] = computeAia(job), () -> {
+            if (out[0] == null) {
+                return;
+            }
+            applyPhaseShiftResult(out[0].field, AIA_METHOD);
+            showAiaShiftPlot(out[0]);
+        });
+    }
+
+    private AiaJob readAiaJob() {
+        AiaJob job = new AiaJob();
+        try {
+            job.maxIter = Integer.parseInt(tfAiaMaxIter.getText().trim());
+        } catch (NumberFormatException ex) {
+            job.maxIter = -1;
+        }
+        if (job.maxIter < 1) {
+            HoloBioFijiUi.message("HoloBio", "Max iterations must be a whole number of at least 1.");
+            return null;
+        }
+        job.guess = aiaGuessBox.getSelectedItem();
+        job.customGuess = tfAiaCustomGuess.getText();
+        job.folder = SRC_FOLDER.equals(psSourceBox.getSelectedItem());
+        job.dir = tfPsFolder.getText();
+        job.filter = tfPsFilter.getText();
+        if (!job.folder) {
+            if (activeSourceImage == null) {
+                HoloBioFijiUi.message("HoloBio", "Use an active image first, or set Frames source to Folder.");
+                return null;
+            }
+            job.stack = activeSourceImage;
+        }
+        job.useRef = cbAiaReference.isSelected();
+        job.refFolder = SRC_FOLDER.equals(aiaRefSourceBox.getSelectedItem());
+        job.refDir = tfAiaRefFolder.getText();
+        job.refFilter = tfAiaRefFilter.getText();
+        if (job.useRef && !job.refFolder) {
+            Object title = aiaRefStackBox.getSelectedItem();
+            job.refStack = title == null ? null : WindowManager.getImage(title.toString());
+            if (job.refStack == null) {
+                HoloBioFijiUi.message("HoloBio", "Pick an open reference stack, or set Reference source to Folder.");
+                return null;
+            }
+        }
+        return job;
+    }
+
+    /**
+     * Background part of AIA: load and normalize the frames, iterate, subtract the reference
+     * shifts (0 without reference), and build the object field modulation·exp(i·phase).
+     * Null (after a message) on bad input.
+     */
+    private static AiaOutput computeAia(AiaJob job) {
+        AiaOutput out = new AiaOutput();
+        List<FloatProcessor> frames;
+        if (job.folder) {
+            out.names = new ArrayList<>();
+            frames = folderFrames(job.dir, job.filter, 0, "Frames", out.names);
+        } else {
+            frames = stackFrames(job.stack, 0, "Frames");
+        }
+        if (frames == null) {
+            return null;
+        }
+        int n = frames.size();
+        int w = frames.get(0).getWidth();
+        int h = frames.get(0).getHeight();
+
+        double[] initialShifts = null;   // null = PCA
+        if (AIA_GUESS_RAMP.equals(job.guess)) {
+            initialShifts = HoloBioAiaMath.rampGuess(n);
+        } else if (AIA_GUESS_CUSTOM.equals(job.guess)) {
+            try {
+                initialShifts = HoloBioAiaMath.parseGuess(job.customGuess, n);
+            } catch (IllegalArgumentException ex) {
+                HoloBioFijiUi.message("HoloBio", ex.getMessage());
+                return null;
+            }
+        }
+
+        Jama.Matrix object = normalizedFringes(frames, "object");
+        HoloBioAiaMath.Result objRes = aiaIterate(object, initialShifts, job.maxIter, "object");
+        if (objRes == null) {
+            return null;
+        }
+        out.objectShifts = objRes.phaseShifts;
+
+        // No reference: shifts of 0, so the object shifts are used as they are.
+        double[] refShifts = new double[n];
+        if (job.useRef) {
+            List<FloatProcessor> refFrames = job.refFolder
+                ? folderFrames(job.refDir, job.refFilter, 0, "Reference", null)
+                : stackFrames(job.refStack, 0, "Reference");
+            if (refFrames == null) {
+                return null;
+            }
+            if (refFrames.size() != n || refFrames.get(0).getWidth() != w || refFrames.get(0).getHeight() != h) {
+                HoloBioFijiUi.message("HoloBio", "Reference must have the same number of frames (" + n
+                    + ") and size (" + w + "x" + h + ") as the object; it has " + refFrames.size() + " frames of "
+                    + refFrames.get(0).getWidth() + "x" + refFrames.get(0).getHeight() + ".");
+                return null;
+            }
+            HoloBioAiaMath.Result refRes = aiaIterate(normalizedFringes(refFrames, "reference"),
+                initialShifts, job.maxIter, "reference");
+            if (refRes == null) {
+                return null;
+            }
+            refShifts = refRes.phaseShifts;
+            out.referenceShifts = refShifts;
+        }
+        double[] corrected = new double[n];
+        for (int k = 0; k < n; k++) {
+            corrected[k] = out.objectShifts[k] - refShifts[k];
+        }
+        out.correctedShifts = corrected;
+
+        HoloBioAiaMath.Result res;
+        try {
+            res = HoloBioAiaMath.fromShifts(object, corrected);
+        } catch (RuntimeException ex) {
+            HoloBioFijiUi.message("HoloBio", "AIA: the shifts left after subtracting the reference are all the same,\n"
+                + "so the phase cannot be computed. Check that the reference is not the object set itself.");
+            return null;
+        }
+        float[] re = new float[w * h];
+        float[] im = new float[w * h];
+        for (int p = 0; p < re.length; p++) {
+            re[p] = (float) (res.modulation[p] * Math.cos(res.phase[p]));
+            im[p] = (float) (res.modulation[p] * Math.sin(res.phase[p]));
+        }
+        out.field = new HoloBioPhaseShifting.Result(re, im, w, h);
+        return out;
+    }
+
+    /**
+     * "AIA phase shifts" plot (as in the MATLAB script): unwrapped shift per frame for the object
+     * (blue) and, with a reference, the reference (red) and the corrected object − reference (green).
+     * x = gray level from the file names (GR_050_... → 50) when they all have a number, else frame number.
+     */
+    private static void showAiaShiftPlot(AiaOutput out) {
+        int n = out.objectShifts.length;
+        double[] x = out.names != null ? grayLevelsFromNames(out.names) : null;
+        boolean byGray = x != null;
+        if (!byGray) {
+            x = new double[n];
+            for (int k = 0; k < n; k++) {
+                x[k] = k + 1;
+            }
+        }
+        ij.gui.Plot plot = new ij.gui.Plot("AIA phase shifts", byGray ? "Gray level" : "Frame", "Phase shift (rad)");
+        plot.setColor(Color.BLUE);
+        plot.add("connected circle", x, unwrap(out.objectShifts));
+        String legend = "Object";
+        if (out.referenceShifts != null) {
+            plot.setColor(Color.RED);
+            plot.add("connected circle", x, unwrap(out.referenceShifts));
+            plot.setColor(new Color(0, 160, 0));
+            plot.add("connected circle", x, unwrap(out.correctedShifts));
+            legend += "\nReference\nObject − reference";
+        }
+        plot.setColor(Color.BLACK);
+        plot.addLegend(legend);
+        plot.show();
+    }
+
+    /**
+     * Gray level per file: the first number group in the names that strictly increases from
+     * file to file (GR_000_2_UP, GR_005_2_UP, ... → 0, 5, ...). Null if no group does, e.g. when
+     * every name shares the same numbers, so the plot falls back to frame number.
+     */
+    private static double[] grayLevelsFromNames(List<String> names) {
+        java.util.regex.Pattern digits = java.util.regex.Pattern.compile("\\d+");
+        List<List<Long>> groups = new ArrayList<>();
+        int minGroups = Integer.MAX_VALUE;
+        for (String name : names) {
+            List<Long> g = new ArrayList<>();
+            java.util.regex.Matcher m = digits.matcher(name);
+            while (m.find()) {
+                String d = m.group();
+                g.add(d.length() > 18 ? Long.MAX_VALUE : Long.parseLong(d));
+            }
+            groups.add(g);
+            minGroups = Math.min(minGroups, g.size());
+        }
+        for (int gi = 0; gi < minGroups; gi++) {
+            double[] x = new double[names.size()];
+            boolean increasing = true;
+            for (int k = 0; k < names.size() && increasing; k++) {
+                x[k] = groups.get(k).get(gi);
+                increasing = k == 0 || x[k] > x[k - 1];
+            }
+            if (increasing) {
+                return x;
+            }
+        }
+        return null;
+    }
+
+    /** MATLAB unwrap (tolerance π). */
+    private static double[] unwrap(double[] a) {
+        double[] out = a.clone();
+        double offset = 0;
+        for (int k = 1; k < a.length; k++) {
+            double d = a[k] - a[k - 1];
+            if (d > Math.PI) {
+                offset -= 2 * Math.PI * Math.ceil((d - Math.PI) / (2 * Math.PI));
+            } else if (d < -Math.PI) {
+                offset += 2 * Math.PI * Math.ceil((-d - Math.PI) / (2 * Math.PI));
+            }
+            out[k] = a[k] + offset;
+        }
+        return out;
+    }
+
+    /** IgramNorm on every frame, packed as the nPixels × nFrames AIA matrix. */
+    private static Jama.Matrix normalizedFringes(List<FloatProcessor> frames, String what) {
+        int n = frames.size();
+        int w = frames.get(0).getWidth();
+        int h = frames.get(0).getHeight();
+        double[][] normalized = new double[n][];
+        for (int i = 0; i < n; i++) {
+            IJ.showStatus("HoloBio AIA: normalizing " + what + " frame " + (i + 1) + "/" + n);
+            IJ.showProgress(i, n);
+            float[] px = (float[]) frames.get(i).getPixels();
+            double[] d = new double[px.length];
+            for (int p = 0; p < px.length; p++) {
+                d[p] = px[p];
+            }
+            normalized[i] = HoloBioAiaMath.normalizeFringes(d, w, h, AIA_NORM_RADIUS);
+        }
+        return HoloBioAiaMath.fringesVector(normalized);
+    }
+
+    /** Runs the AIA iteration with status updates; null after a message if it fails. */
+    private static HoloBioAiaMath.Result aiaIterate(Jama.Matrix fringes, double[] initialShifts,
+                                                    int maxIter, String what) {
+        HoloBioAiaMath.Result res;
+        try {
+            res = HoloBioAiaMath.run(fringes, initialShifts, maxIter, AIA_PRECISION, (it, max, err) -> {
+                IJ.showStatus("HoloBio AIA (" + what + "): iteration " + it + "/" + max);
+                IJ.showProgress(it, max);
+            });
+        } catch (RuntimeException ex) {
+            HoloBioFijiUi.message("HoloBio", "AIA failed (" + what + "): " + ex.getMessage());
+            return null;
+        }
+        IJ.showProgress(1.0);
+        return res;
     }
 
     // ---------------- Propagation / params / output ----------------
@@ -1449,35 +1951,99 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
+    /** Frames from the chosen source. requiredFrames = 0 means all frames (at least 3). */
     private List<FloatProcessor> collectPhaseShiftFrames(int requiredFrames) {
+        if (SRC_FOLDER.equals(psSourceBox.getSelectedItem())) {
+            return folderFrames(tfPsFolder.getText(), tfPsFilter.getText(), requiredFrames, "Frames", null);
+        }
         if (activeSourceImage == null) {
-            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
+            HoloBioFijiUi.message("HoloBio", "Use an active image first, or set Frames source to Folder.");
             return null;
         }
-        ImagePlus imp = activeSourceImage;
+        return stackFrames(activeSourceImage, requiredFrames, "Frames");
+    }
+
+    private static List<FloatProcessor> stackFrames(ImagePlus imp, int requiredFrames, String what) {
         int nPlanes = imp.getStackSize();
-        if (nPlanes < requiredFrames) {
+        int n = requiredFrames > 0 ? requiredFrames : nPlanes;
+        if (nPlanes < (requiredFrames > 0 ? requiredFrames : 3)) {
             HoloBioFijiUi.message(
                 "HoloBio",
-                "Selected method needs " + requiredFrames
+                what + ": selected method needs " + (requiredFrames > 0 ? requiredFrames : "at least 3")
                     + " planes; this image has " + nPlanes
                     + " (C=" + imp.getNChannels() + ", Z=" + imp.getNSlices() + ", T=" + imp.getNFrames() + ").\n"
-                    + "Use a Z stack with the required number of slices (not multiple channels in one slice), e.g. 2 slices for BPS2 or 3 for BPS3."
+                    + "Use a Z stack with the required number of slices (not multiple channels in one slice), e.g. 2 slices for BPS2, 3 for BPS3, or at least 3 for AIA."
             );
             return null;
         }
-        List<FloatProcessor> frames = new ArrayList<>(requiredFrames);
+        List<FloatProcessor> frames = new ArrayList<>(n);
         int w = imp.getWidth();
         int h = imp.getHeight();
         ImageStack stack = imp.getStack();
-        for (int i = 1; i <= requiredFrames; i++) {
+        for (int i = 1; i <= n; i++) {
             ImageProcessor ip = stack.getProcessor(i);
             if (ip.getWidth() != w || ip.getHeight() != h) {
-                HoloBioFijiUi.message("HoloBio", "All phase-shift planes must have the same width and height.");
+                HoloBioFijiUi.message("HoloBio", what + ": all phase-shift planes must have the same width and height.");
                 return null;
             }
             frames.add((FloatProcessor) ip.convertToFloatProcessor().duplicate());
         }
+        return frames;
+    }
+
+    /**
+     * Images in {@code dir} whose name contains {@code filter}, sorted by name.
+     * The names of the files used are added to {@code usedNames} when it is not null.
+     */
+    private static List<FloatProcessor> folderFrames(String dir, String filter, int requiredFrames, String what,
+                                                     List<String> usedNames) {
+        java.io.File folder = new java.io.File(dir.trim());
+        String[] all = folder.list();
+        if (dir.trim().isEmpty() || all == null) {
+            HoloBioFijiUi.message("HoloBio", what + ": choose a valid folder.");
+            return null;
+        }
+        Arrays.sort(all);
+        List<String> names = new ArrayList<>();
+        for (String name : all) {
+            String low = name.toLowerCase();
+            boolean image = low.endsWith(".bmp") || low.endsWith(".tif") || low.endsWith(".tiff")
+                || low.endsWith(".png") || low.endsWith(".jpg") || low.endsWith(".jpeg");
+            if (image && !name.startsWith("._") && name.contains(filter)) {
+                names.add(name);
+            }
+        }
+        int n = requiredFrames > 0 ? requiredFrames : names.size();
+        if (names.size() < (requiredFrames > 0 ? requiredFrames : 3)) {
+            HoloBioFijiUi.message("HoloBio", what + ": found " + names.size() + " matching images in " + dir
+                + "; the selected method needs " + (requiredFrames > 0 ? requiredFrames : "at least 3") + ".");
+            return null;
+        }
+        List<FloatProcessor> frames = new ArrayList<>(n);
+        int w = 0;
+        int h = 0;
+        for (int i = 0; i < n; i++) {
+            IJ.showStatus("HoloBio: loading " + what.toLowerCase() + " " + (i + 1) + "/" + n);
+            IJ.showProgress(i, n);
+            ImagePlus imp = IJ.openImage(new java.io.File(folder, names.get(i)).getPath());
+            if (imp == null) {
+                HoloBioFijiUi.message("HoloBio", what + ": could not open " + names.get(i) + ".");
+                return null;
+            }
+            if (i == 0) {
+                w = imp.getWidth();
+                h = imp.getHeight();
+            } else if (imp.getWidth() != w || imp.getHeight() != h) {
+                HoloBioFijiUi.message("HoloBio", what + ": " + names.get(i) + " has a different size than "
+                    + names.get(0) + ".");
+                return null;
+            }
+            frames.add(imp.getProcessor().convertToFloatProcessor());
+            if (usedNames != null) {
+                usedNames.add(names.get(i));
+            }
+        }
+        IJ.showProgress(1.0);
         return frames;
     }
 
@@ -1840,7 +2406,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 cardPanel.getParent().revalidate();
                 java.awt.Window w = javax.swing.SwingUtilities.getWindowAncestor(cardPanel);
                 if (w != null) {
-                    HoloBioUiStyle.packTight(w, 0, 500, 720);
+                    packWindow(w);
                 }
             }
         }

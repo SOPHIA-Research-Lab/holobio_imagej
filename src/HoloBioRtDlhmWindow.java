@@ -17,9 +17,18 @@ import java.util.List;
  * Real-time DLHM window.
  *
  * <p>Reuses the shared RT plumbing (frame source, display panels, FPS meters, recorder, grey
- * conversion) from the RT DHM module. Live reconstruction uses DLHM-rec
- * ({@link HoloBioDlhmMath#reconstructAS}), matching Python {@code main_DLHM_RT.py}'s
- * {@code propagate()} path with scale factor L/Z.
+ * conversion) from the RT DHM module. Live reconstruction is fixed to DLHM-rec, shown as
+ * "Realistic A.S" as in Python RT (published as MAS):
+ * {@code params.setAlgorithm("DL")} dispatches to {@link HoloBioDlhmMath#reconstructDlhm}, the
+ * port of Python {@code dlhm_rec} with its radial undistortion — the same code Offline DLHM runs
+ * for "DLHM".
+ *
+ * <p><b>Deliberate departure from Python.</b> {@code main_DLHM_RT.py} offers Angular Spectrum,
+ * Kreuzer and DLHM-rec ("Realistic A.S") and defaults to Angular Spectrum ({@code propagate()}
+ * with scale factor L/Z). This window offers DLHM-rec only: AS is valid only while
+ * |r|·(L/Z) ≤ N·pitch²/λ, which typical DLHM geometries exceed, and Python's AS kernel also
+ * propagates one factor of L/Z short (technical reference §32.1). AS and Kreuzer remain
+ * available in Offline DLHM.
  */
 public class HoloBioRtDlhmWindow extends JFrame {
 
@@ -328,11 +337,14 @@ public class HoloBioRtDlhmWindow extends JFrame {
         lblMag = readoutLabel("2.00×");
         addOpticsRow(p, c, "Magnification", lblMag, lw, null, null);
 
-        // Algorithm is fixed for live DLHM — a stated value, not a combo of AS/DL/KR.
-        addOpticsRow(p, c, "Algorithm", readoutLabel("DLHM"), lw,
-                "DLHM-rec",
-                "Lensless in-line reconstruction with radial undistort, matching Python "
-                + "dlhm_rec(). Chosen over Angular Spectrum because AS is only valid while "
+        // Algorithm is fixed for live DLHM — a stated value, not a combo of AS/DL/KR. Labelled as
+        // Python RT labels it ("Realistic A.S"); the published name of the method is MAS.
+        addOpticsRow(p, c, "Algorithm", readoutLabel("Realistic A.S"), lw,
+                "Realistic A.S",
+                "Realistic angular spectrum, as in HoloBio Python (\"Realistic A.S\", function "
+                + "dlhm_rec): radial undistortion of the hologram, then angular-spectrum "
+                + "propagation over r = L - Z on the sample-plane frequency grid scaled by L/Z. "
+                + "Chosen over plain Angular Spectrum because AS is only valid while "
                 + "|r|*(L/Z) <= N*pitch^2/lambda, which typical DLHM geometries exceed.");
 
         c.gridx = 0;
@@ -604,7 +616,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
         head.add(rbHologram);
         head.add(rbFourier);
         head.add(HoloBioUiStyle.infoButton("Fourier transform",
-            "The spectrum of the frame DLHM-rec reconstructs, after binning: "
+            "The spectrum of the frame being reconstructed, after binning: "
             + "normalize(log1p(|FFT|)), as in HoloBio Python.\n\n"
             + "There are no filter controls here, unlike Real-Time DHM. DLHM is in-line: the "
             + "reconstruction propagates the whole spectrum, so there is no +1 order to "
@@ -1110,7 +1122,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
 
                 if (!reportedGeometry) {
                     reportedGeometry = true;
-                    setStatus(String.format("Frame %d×%d  ·  DLHM-rec  ·  Mag=%.2f×",
+                    setStatus(String.format("Frame %d×%d  ·  Realistic A.S  ·  Mag=%.2f×",
                             w, h, params.getMagnification()));
                 }
 
@@ -1167,15 +1179,17 @@ public class HoloBioRtDlhmWindow extends JFrame {
         BufferedImage in  = pnlLeft .getImage();
         BufferedImage out = pnlRight.getImage();
         if (in == null && out == null) { setStatus("No frame ready."); return; }
+        // Repeated snaps become slices of one Fiji image per view (no new window each time).
+        String stamp = new java.text.SimpleDateFormat("HH:mm:ss.SSS").format(new java.util.Date());
         if (in != null) {
-            HoloBioFijiUi.showImagePlus(new ImagePlus(
-                    showFourier ? "RT DLHM — Fourier Transform" : "RT DLHM — Hologram", toProcessor(in)));
+            HoloBioFijiUi.appendSnapshot(
+                    showFourier ? "RT DLHM — Fourier Transform" : "RT DLHM — Hologram", toProcessor(in), stamp);
         }
         if (out != null) {
             String title = showPhase ? "RT DLHM — Phase" : "RT DLHM — Amplitude";
-            HoloBioFijiUi.showImagePlus(new ImagePlus(title, toProcessor(out)));
+            HoloBioFijiUi.appendSnapshot(title, toProcessor(out), stamp);
         }
-        setStatus("Snapped current views to Fiji.");
+        setStatus("Snapshot " + stamp + " added to Fiji (one image per view; snaps stack as slices).");
     }
 
     /**

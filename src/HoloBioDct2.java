@@ -118,21 +118,17 @@ final class HoloBioDct2 {
 
 
 
+    /**
+     * Inverse of {@link #dct1InPlace} ({@code scipy.fft.idct}, norm=none):
+     * {@code x[j] = (X[0] + 2·Σ_{k≥1} X[k]·cos(πk(2j+1)/2n)) / 2n}.
+     *
+     * <p>Via one length-{@code 2n} inverse FFT of {@code w[k]·X[k]·e^{iπk/2n}} (w[0] = ½),
+     * whose real part is that sum divided by 2n·½. The previous version dropped both the ½ on
+     * the k = 0 term and the factor 2 on the rest, and then overwrote half the output from the
+     * mirrored end of the buffer, so idct(dct(x)) ≠ x. Every DCT Poisson solve — the phase
+     * unwrapper behind the Legendre fits — inherited the error.
+     */
     private static void idct1InPlace(double[] data, int off, int n) {
-
-        double[] coeffRe = new double[n];
-
-        double[] coeffIm = new double[n];
-
-        for (int k = 0; k < n; k++) {
-
-            double ang = Math.PI * k / (2.0 * n);
-
-            coeffRe[k] = data[off + k] * Math.cos(ang);
-
-            coeffIm[k] = data[off + k] * Math.sin(ang);
-
-        }
 
         int n2 = n * 2;
 
@@ -140,19 +136,23 @@ final class HoloBioDct2 {
 
         double[] im = new double[n2];
 
-        System.arraycopy(coeffRe, 0, re, 0, n);
+        for (int k = 0; k < n; k++) {
+
+            double ang = Math.PI * k / (2.0 * n);
+
+            double w = k == 0 ? 0.5 : 1.0;
+
+            re[k] = w * data[off + k] * Math.cos(ang);
+
+            im[k] = w * data[off + k] * Math.sin(ang);
+
+        }
 
         fft1d(re, im, true);
 
         for (int i = 0; i < n; i++) {
 
-            data[off + i] = re[i];
-
-        }
-
-        for (int i = 1; i < n; i++) {
-
-            data[off + n - i] = re[n2 - i];
+            data[off + i] = 2.0 * re[i];
 
         }
 

@@ -288,8 +288,14 @@ final class HoloBioVortexLegendre {
         }
     }
 
-    private static double[] vortexCompensation(double[] field, int rows, int cols,
-                                                 double fxOverMax, double fyOverMax) {
+    /**
+     * Python {@code vortex_compensation}: sub-pixel +1-order position from the phase vortex of
+     * the Hilbert-transformed log spectrum, 55× interpolated around the integer peak.
+     * {@code field} is the fftshifted log-power spectrum, {@code rows × cols}; the seed and the
+     * returned {x, y} are in those shifted coordinates. Shared with Real-Time DHM.
+     */
+    static double[] vortexCompensation(double[] field, int rows, int cols,
+                                       double fxOverMax, double fyOverMax) {
         // Python: field[int(fy-crop):int(fy+crop), int(fx-crop):int(fx+crop)] → 2*crop × 2*crop (exclusive end)
         int y0 = (int) (fyOverMax - CROP_VORTEX);
         int yEnd = (int) (fyOverMax + CROP_VORTEX);

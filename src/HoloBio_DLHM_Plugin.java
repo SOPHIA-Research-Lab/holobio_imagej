@@ -435,6 +435,7 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
             currentFieldIm = null;
             fieldW = 0; fieldH = 0;
             ampImage = null; phaseImage = null;
+            speckleState.clear();               // as Offline DHM: a new hologram starts afresh
             showInFiji(holoImage, "DLHM Hologram");
             setStatus("Hologram loaded: " + holoW + "×" + holoH + " px  |  " + imp.getTitle());
             log("Loaded: " + imp.getTitle() + " (" + holoW + "×" + holoH + ")");
@@ -545,6 +546,10 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
                     currentFieldIm = result[1];
                     fieldW = w;
                     fieldH = h;
+                    // Speckle originals and iterations belong to one reconstruction; the state
+                    // keeps an original only if none is stored, so a new one must start clean.
+                    speckleState.clear();
+                    speckleState.setOriginalField(currentFieldRe, currentFieldIm);
                     showResults();
                     setStatus(String.format("Done — L=%.0f  Z=%.0f  r=%.0f µm  |  %s",
                             snap.getL(), snap.getZ(), snap.getR(), snap.getAlgorithm()));
@@ -731,6 +736,11 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
     @Override
     public void onSpeckleFilterResult(boolean amplitudeChannel, FloatProcessor filtered0255) {
         if (filtered0255 == null) return;
+        // Recording the filtered image is what enables Compare and Measure in the Speckle
+        // dialog (it checks speckleState.hasFiltered); Offline DHM always did, DLHM did not.
+        float[] px = (float[]) filtered0255.getPixels();
+        if (amplitudeChannel) speckleState.setFilteredAmplitude(px);
+        else speckleState.setFilteredPhase(px);
         String title = amplitudeChannel ? "DLHM Amplitude" : "DLHM Phase";
         ImagePlus out = new ImagePlus(title, filtered0255);
         showInFiji(out, title);

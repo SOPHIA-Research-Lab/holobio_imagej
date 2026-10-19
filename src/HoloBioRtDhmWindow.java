@@ -117,6 +117,10 @@ public class HoloBioRtDhmWindow extends JFrame {
     private volatile int gridRows, gridCols;
     private JLabel  lblFilter;
     private JButton btnAutoFilter;
+    /** Manual +1-order selection: a click on the FT sets the filter centre until Re-detect. */
+    private JToggleButton btnPickOrder;
+    private volatile boolean manualOrder;
+    private volatile int     manualCx, manualCy;   // centred spectrum coords, DC at grid/2
 
     // ── Most recent renders, so a view switch repaints without a new frame ────
     private volatile BufferedImage lastHologram, lastFourier, lastAmplitude, lastPhase;
@@ -923,8 +927,27 @@ public class HoloBioRtDhmWindow extends JFrame {
         btnAutoFilter.setToolTipText("Search the spectrum again for the +1 diffraction order");
         btnAutoFilter.addActionListener(e -> {
             warnedNoCarrier = false;
+            clearManualOrder();
             HoloBioRtDhmMath.resetSideband();
-            setStatus("Re-detecting carrier…");
+            setStatus("Re-detecting carrier automatically…");
+        });
+
+        btnPickOrder = HoloBioUiStyle.toggleButton("Pick +1");
+        btnPickOrder.setToolTipText("Click the +1 order on the FT to set the filter centre by hand. "
+                + "Re-detect returns to automatic detection.");
+        btnPickOrder.addActionListener(e -> {
+            if (!btnPickOrder.isSelected()) {
+                pnlLeft.setPointPick(null);
+                return;
+            }
+            if (lastFourier == null || gridCols <= 0) {
+                btnPickOrder.setSelected(false);
+                setStatus("Start the source first, then pick the +1 order on the FT.");
+                return;
+            }
+            if (!rbFourier.isSelected()) rbFourier.doClick();
+            setStatus("Click the centre of the +1 order on the FT view.");
+            pnlLeft.setPointPick(this::onOrderPicked);
         });
 
         // Python's ft_display_var: the spectrum as it arrives, or what survives the mask.
@@ -960,25 +983,61 @@ public class HoloBioRtDhmWindow extends JFrame {
 
         lblFilter = HoloBioUiStyle.fieldLabel("Filter: auto");
 
-        JPanel head = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, 2);
-        head.add(rbHologram);
-        head.add(rbFourier);
-        head.add(cbFtView);
-        head.add(cbFtShape);
-        head.add(HoloBioUiStyle.hgap(HoloBioUiStyle.SPACE_2));
-        head.add(HoloBioUiStyle.fieldLabel("Factor"));
-        head.add(tfFtFactor);
-        head.add(HoloBioUiStyle.hgap(HoloBioUiStyle.SPACE_2));
-        head.add(HoloBioUiStyle.fieldLabel("r px"));
-        head.add(tfFtRadius);
-        head.add(HoloBioUiStyle.hgap(HoloBioUiStyle.SPACE_2));
-        head.add(btnAutoFilter);
+        // Two explicit rows: a single FlowLayout row wraps at normal widths, but its height
+        // stays one row, so Factor, r px and Re-detect were cut off out of sight.
+        JPanel row1 = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, 2);
+        row1.add(rbHologram);
+        row1.add(rbFourier);
+        row1.add(cbFtView);
+        row1.add(cbFtShape);
+        JPanel row2 = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, 2);
+        row2.add(HoloBioUiStyle.fieldLabel("Factor"));
+        row2.add(tfFtFactor);
+        row2.add(HoloBioUiStyle.hgap(HoloBioUiStyle.SPACE_2));
+        row2.add(HoloBioUiStyle.fieldLabel("r px"));
+        row2.add(tfFtRadius);
+        row2.add(HoloBioUiStyle.hgap(HoloBioUiStyle.SPACE_2));
+        row2.add(btnAutoFilter);
+        row2.add(btnPickOrder);
+        JPanel head = new JPanel(new GridLayout(2, 1, 0, 0));
+        head.setOpaque(false);
+        head.add(row1);
+        head.add(row2);
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBorder(HoloBioUiStyle.sectionPad("Input"));
         wrap.add(head,    BorderLayout.NORTH);
         wrap.add(pnlLeft, BorderLayout.CENTER);
         return wrap;
+    }
+
+    /**
+     * A click on the FT view. The FT image is the whole transform grid resampled to a square,
+     * so pixel (x, y) maps to grid coordinate (x·gridCols/W, y·gridRows/H), DC at grid/2.
+     */
+    private void onOrderPicked(double x, double y) {
+        java.awt.image.BufferedImage ft = lastFourier;
+        int gC = gridCols, gR = gridRows;
+        btnPickOrder.setSelected(false);
+        if (ft == null || gC <= 0 || gR <= 0) return;
+        int cx = (int) Math.round(x * gC / ft.getWidth());
+        int cy = (int) Math.round(y * gR / ft.getHeight());
+        if (Math.hypot(cx - gC / 2.0, cy - gR / 2.0) < 4) {
+            setStatus("That is the zero order (centre). Click the +1 order instead.");
+            return;
+        }
+        manualCx = cx;
+        manualCy = cy;
+        manualOrder = true;
+        setStatus(String.format(Locale.US,
+                "+1 order set by hand at offset (%+d, %+d) from DC. Re-detect returns to automatic.",
+                cx - gC / 2, cy - gR / 2));
+    }
+
+    private void clearManualOrder() {
+        manualOrder = false;
+        if (pnlLeft != null) pnlLeft.setPointPick(null);
+        if (btnPickOrder != null) btnPickOrder.setSelected(false);
     }
 
     private void updateFilterLabel() {
@@ -989,9 +1048,9 @@ public class HoloBioRtDhmWindow extends JFrame {
         String how = HoloBioRtUtil.parseInt(tfFtRadius, 0) > 0
                 ? "manual"
                 : String.format(Locale.US, "auto dist/%.3g", HoloBioRtUtil.parseDouble(tfFtFactor, 3.0));
-        String text = String.format("Filter: %s  ·  r = %d (%s)%s",
+        String text = String.format("Filter: %s  ·  +1 %s  ·  r = %d (%s)%s",
                 FT_CIRCLE.equals(cbFtShape.getSelectedItem()) ? "Circular" : "Rectangular",
-                filterRadius, how, offset);
+                manualOrder ? "picked" : "auto", filterRadius, how, offset);
         SwingUtilities.invokeLater(() -> lblFilter.setText(text));
     }
 
@@ -1008,8 +1067,8 @@ public class HoloBioRtDhmWindow extends JFrame {
         cbCompMethod = new JComboBox<>(new String[] { "Vortex", "Vortex Legendre" });
         cbCompMethod.setSelectedItem("Vortex Legendre");
         cbCompMethod.setToolTipText(
-                "Vortex: sideband extraction without Legendre flattening. "
-                + "Vortex Legendre: plus polynomial flattening of residual tilt and curvature. "
+                "Vortex: sub-pixel carrier by vortex search, removed with a reference wave. "
+                + "Vortex Legendre: plus Legendre orders 2-6 (tilt and curvature). "
                 + "Semi-Heuristic and Tu-DHM are in Offline DHM.");
         HoloBioUiStyle.sizeField(cbCompMethod, 148);
         cbCompMethod.addActionListener(e -> {
@@ -1023,9 +1082,16 @@ public class HoloBioRtDhmWindow extends JFrame {
         head.add(rbAmplitude);
         head.add(cbCompMethod);
         head.add(HoloBioUiStyle.infoButton("Reconstruction method",
-            "Vortex extracts the +1-order sideband.\n\n"
-            + "Vortex Legendre (default) also flattens residual tilt and curvature "
-            + "with Legendre polynomials.\n\n"
+            "Vortex: filters the +1 order, places its carrier to sub-pixel accuracy with the "
+            + "vortex search (55x interpolated spiral-phase transform, as Python HoloBio) and "
+            + "removes it with a reference wave. A vortex result more than 1.5 bins from the "
+            + "peak is rejected and the peak is used.\n\n"
+            + "Vortex Legendre (default): also fits square Legendre polynomials on a low-pass "
+            + "copy of the field and removes orders 2-6 (tilt and curvature) at full "
+            + "resolution, as the EAFIT MATLAB live tool, unwrapping with the reliability "
+            + "method Python HoloBio uses (robust to noisy, dark regions).\n\n"
+            + "For speed, the vortex search runs when the order is detected (Start, Re-detect) "
+            + "and the Legendre fit every fourth frame; both are reused in between.\n\n"
             + "Semi-Heuristic and Tu-DHM are available in Offline DHM."));
 
         JPanel wrap = new JPanel(new BorderLayout());
@@ -1181,6 +1247,7 @@ public class HoloBioRtDhmWindow extends JFrame {
         reconFps.reset();
         synchronized (frameLock) { readyGray = null; spareGray = null; }
         refreshFpsLabels();
+        clearManualOrder();
         HoloBioRtDhmMath.resetSideband();
         setStatus(statusMsg);
 
@@ -1358,9 +1425,20 @@ public class HoloBioRtDhmWindow extends JFrame {
                 double dyUm     = HoloBioRtUtil.parseDouble(tfPixelY,     3.75);
                 HoloBioRtDhmMath.setRadiusFactor(HoloBioRtUtil.parseDouble(tfFtFactor, 3.0));
                 HoloBioRtDhmMath.setManualRadiusPx(HoloBioRtUtil.parseInt(tfFtRadius, 0));
+                int fMode = HoloBioRtDhmMath.FILTER_NONE, fCx = 0, fCy = 0, fR = 0;
+                if (manualOrder) {
+                    int g = HoloBioRectFft.nextPowerOfTwo(Math.max(2, Math.min(h, w) & ~1));
+                    fMode = HoloBioRtDhmMath.FILTER_CIRCLE;
+                    fCx = manualCx;
+                    fCy = manualCy;
+                    int rpx = HoloBioRtUtil.parseInt(tfFtRadius, 0);
+                    double dist = Math.hypot(manualCx - g / 2.0, manualCy - g / 2.0);
+                    fR = rpx > 0 ? rpx : Math.max(1, (int) Math.round(
+                            dist / Math.max(1.0, HoloBioRtUtil.parseDouble(tfFtFactor, 3.0))));
+                }
                 HoloBioRtDhmMath.Frame result = HoloBioRtDhmMath.process(
                         gray, h, w, lambdaUm, dxUm, dyUm,
-                        HoloBioRtDhmMath.FILTER_NONE, 0, 0, 0,
+                        fMode, fCx, fCy, fR,
                         needFt, true, needAmp, needPhase);
                 captureField();
 
@@ -1373,7 +1451,7 @@ public class HoloBioRtDhmWindow extends JFrame {
                 filterCy = HoloBioRtDhmMath.sidebandRow();
                 filterRadius = HoloBioRtDhmMath.sidebandRadius();
                 updateFilterLabel();
-                if (!HoloBioRtDhmMath.sidebandConfident() && !warnedNoCarrier) {
+                if (!manualOrder && !HoloBioRtDhmMath.sidebandConfident() && !warnedNoCarrier) {
                     warnedNoCarrier = true;
                     setStatus(String.format(
                             "No off-axis carrier found (prominence %.1f× vs %.0f× needed) — "
@@ -1484,15 +1562,17 @@ public class HoloBioRtDhmWindow extends JFrame {
         BufferedImage in  = pnlLeft .getImage();
         BufferedImage out = pnlRight.getImage();
         if (in == null && out == null) { setStatus("No frame ready."); return; }
+        // Repeated snaps become slices of one Fiji image per view (no new window each time).
+        String stamp = new java.text.SimpleDateFormat("HH:mm:ss.SSS").format(new java.util.Date());
         if (in != null) {
             String title = showFourier ? "RT DHM — Fourier Transform" : "RT DHM — Hologram";
-            HoloBioFijiUi.showImagePlus(new ImagePlus(title, toProcessor(in)));
+            HoloBioFijiUi.appendSnapshot(title, toProcessor(in), stamp);
         }
         if (out != null) {
             String title = showPhase ? "RT DHM — Phase" : "RT DHM — Amplitude";
-            HoloBioFijiUi.showImagePlus(new ImagePlus(title, toProcessor(out)));
+            HoloBioFijiUi.appendSnapshot(title, toProcessor(out), stamp);
         }
-        setStatus("Snapped current views to Fiji.");
+        setStatus("Snapshot " + stamp + " added to Fiji (one image per view; snaps stack as slices).");
     }
 
     /**

@@ -170,6 +170,49 @@ public final class HoloBioFijiUi {
     }
 
     /**
+     * Add a snapshot to the Fiji image called {@code title}: the first one opens a normal Fiji
+     * image; later ones are appended to it as new slices (labelled {@code sliceLabel}) and the
+     * same window shows them. A new image is opened only if that window was closed or the
+     * snapshot's size or type differs.
+     *
+     * <p>Why not one window per snapshot: {@link #showImagePlus} replaces an existing image of
+     * the same title by closing its window and opening a new one. Snapping twice from a live
+     * view therefore destroyed and created native AWT windows while the view kept repainting,
+     * and on the development machine (Intel Iris Xe) that crashed Fiji inside the graphics
+     * driver ({@code igxelpicd64.dll}, 18 Oct 2026). Appending to a stack creates no window.
+     */
+    public static void appendSnapshot(String title, ij.process.ImageProcessor ip, String sliceLabel) {
+        if (ip == null) {
+            return;
+        }
+        Runnable add = () -> {
+            ImagePlus existing = WindowManager.getImage(title);
+            boolean reuse = existing != null && existing.getWindow() != null
+                    && !existing.getWindow().isClosed()
+                    && existing.getWidth() == ip.getWidth() && existing.getHeight() == ip.getHeight()
+                    && existing.getBitDepth() == ip.getBitDepth();
+            if (reuse) {
+                ij.ImageStack stack = existing.getStack();
+                stack.addSlice(sliceLabel, ip);
+                existing.setStack(stack);
+                existing.setSlice(stack.getSize());
+                existing.changes = false;
+                return;
+            }
+            ij.ImageStack stack = new ij.ImageStack(ip.getWidth(), ip.getHeight());
+            stack.addSlice(sliceLabel, ip);
+            ImagePlus imp = new ImagePlus(title, stack);
+            imp.show();
+            imp.changes = false;
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            add.run();
+        } else {
+            SwingUtilities.invokeLater(add);
+        }
+    }
+
+    /**
      * Open QPI / Speckle from the plugin JAR even when Fiji defined the caller
      * on the application class loader (which cannot see {@code plugins/*.jar}).
      */
