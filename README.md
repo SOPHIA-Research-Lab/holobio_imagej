@@ -1,6 +1,6 @@
 # HoloBio — Fiji Plugin
 
-Digital holographic microscopy (DHM) and lensless digital holographic microscopy (DLHM)
+Digital holographic microscopy (DHM) and lensless digital holographic microscopy (DLHM) acquisition, reconstruction and quantitative analysis plugin
 for Fiji, with both offline post-processing and live camera reconstruction.
 
 Ported from the HoloBio Python (https://sophia-research-lab.github.io/HoloBio/) platform; the reconstruction math follows the Python
@@ -63,7 +63,7 @@ menu: phase profiles and speckle
 6. With a camera running  a **Camera** section appears under Capture with
    **Exposure** (and *Auto*) and **Gain**. It starts from whatever the camera currently
    holds and changes nothing until you move a control. Settings are stored by the camera
-   driver, not by HoloBio. IN PLUGIN GAIN AND EXPOSURE LIVE CONFIG ONLY WORKS IN WINDOWS
+   driver, not by HoloBio. ONLY WORKS IN WINDOWS
 
 ## Project layout
 
@@ -74,7 +74,25 @@ menu: phase profiles and speckle
 | `build.ps1` / `build.bat` | Auto compile, self-check, and install into Fiji |
 | `HoloBio_.jar` | Pre-built plugin |
 
-## Third-party
+| Algorithm | File |
+|---|---|
+| Phase compensation (ERS / Semi-Heuristic, CFS / Tu-DHM) and spectrum filtering | `HoloBioCompensationAlgorithms.java` |
+| Vortex-Legendre (offline) | `HoloBioVortexLegendre.java` |
+| Real-time DHM pipeline (+1-order detection, vortex carrier, reference wave) | `HoloBioRtDhmMath.java` |
+| Real-time Legendre fit  | `HoloBioLegendreLive.java` |
+| Phase unwrapping, weighted least squares (offline Vortex-Legendre) | `HoloBioWeightedPhaseUnwrap.java`, with `HoloBioDct2.java` for its transforms |
+| Phase shifting (BPS2/3) | `HoloBioPhaseShifting.java` |
+| (AIA) Iterative phase shifting | `HoloBioAiaMath.java` |
+| Numerical propagation for DHM (angular spectrum, Fresnel) | `HoloBioPropagationMath.java` |
+| DLHM reconstruction (angular spectrum, Kreuzer, R. angular spectrum / MAS) | `HoloBioDlhmMath.java` |
+| Real-time DLHM wrapper (calls `HoloBioDlhmMath` with cached buffers) | `HoloBioRtDlhmMath.java` |
+| QPI and speckle analysis | `HoloBioQpiSpeckleMath.java` |
+| FFT | `HoloBioRectFft.java` |
+| Multi-core splitting of row/column operations | `HoloBioParallel.java` |
+| microstructure statistics (UNFINISHED NOT IN UI) | `HoloBioMicrostructureMath.java` |
+
+
+## Third-party libs
 
 - [jcobyla](https://github.com/cureos/jcobyla) — COBYLA optimiser, bundled into the plugin JAR
 - [webcam-capture](https://github.com/sarxos/webcam-capture) + [BridJ](https://github.com/nativelibs4java/BridJ) — camera access for the real-time modules
@@ -82,7 +100,7 @@ menu: phase profiles and speckle
 
 ---
 
-### Extra: Adding your own code and fast compiling (Windows)
+### Extra: Adding your own code and fast compiling 
 
 If you want to add your own functions and don't want to build and copy paste the .jar into Fiji everytime, you can use the build.bat or build.ps1 scripts for fast builts.
 
