@@ -7,6 +7,7 @@ Ported from [HoloBio Python](https://sophia-research-lab.github.io/HoloBio/). Th
 reconstruction methods follow the Python reference implementations; the real-time DHM
 compensation also follows the EAFIT MATLAB live tool.
 
+Video demo: https://youtu.be/6EUapBbpczM
 ## Modules
 
 The plugin installs four commands under **Plugins ▸ HoloBio**:
