@@ -35,12 +35,9 @@ The **QPI** and **Speckle** analysis tools open from the offline modules' *Analy
 
 1. Copy `HoloBio_.jar` into `Fiji.app/plugins/`.
 2. If an older install left `webcam-capture-0.3.12.jar` or `bridj-0.7.0.jar` in
-   `Fiji.app/jars/`, delete them. Both are now bundled inside `HoloBio_.jar`.
+   `Fiji.app/jars/`, delete them. 
 3. Restart Fiji.
 
-If QPI or Speckle fail to open, build from source (below): the build also installs
-`HoloBio-core.jar` into `Fiji.app/jars/`, which makes the analysis tools visible to every
-Fiji class loader.
 
 ### From source (Windows)
 
@@ -51,6 +48,8 @@ Fiji class loader.
    self-check, and installs `HoloBio_.jar` into `Fiji.app\plugins\` and `HoloBio-core.jar`
    into `Fiji.app\jars\`.
 4. Restart Fiji.
+
+Recommended if adding custom tools for fast compilation.
 
 ## Use
 
