@@ -1,78 +1,102 @@
 # HoloBio — Fiji Plugin
 
-Digital holographic microscopy (DHM) and lensless digital holographic microscopy (DLHM) acquisition, reconstruction and quantitative analysis plugin
-for Fiji, with both offline post-processing and live camera reconstruction.
+Digital holographic microscopy (DHM) and digital lensless holographic microscopy (DLHM)
+for Fiji, with offline post-processing and live reconstruction from a camera or video.
 
-Ported from the HoloBio Python (https://sophia-research-lab.github.io/HoloBio/) platform; the reconstruction math follows the Python
-reference implementations (`pyDHM_methods`, `phaseShifting`, `parallel_rc`).
+Ported from [HoloBio Python](https://sophia-research-lab.github.io/HoloBio/). The
+reconstruction methods follow the Python reference implementations; the real-time DHM
+compensation also follows the EAFIT MATLAB live tool.
 
 ## Modules
 
-The plugin installs four modules under **Plugins ▸ HoloBio**:
+The plugin installs four commands under **Plugins ▸ HoloBio**:
 
 | Command | What it does |
 |---|---|
-| **Offline DHM** | Off-axis DHM on a loaded hologram: phase compensation (ERS / CFS / Vortex–Legendre), phase shifting (BPS2/3), numerical propagation (angular spectrum / Fresnel) with z-scan and autofocus |
-| **Offline DLHM** | Lensless in-line reconstruction (angular spectrum, DLHM-rec, Kreuzer) from a hologram plus optional reference |
-| **Real-Time DHM** | Live off-axis reconstruction from a camera or video file, with FT view and filter control, live phase profiles, video recording, complex-field recording, and live camera exposure / gain |
-| **Real-Time DLHM** | Live lensless reconstruction from a camera or video file, with video recording, complex-field recording, and live camera exposure / gain |
+| **Offline DHM** | Off-axis DHM on an image open in Fiji: phase compensation (semi-heuristic / ERS, Tu-DHM / CFS, Vortex–Legendre), phase shifting (BPS2, BPS3, AIA), numerical propagation (angular spectrum, Fresnel) with z-scan and autofocus |
+| **Offline DLHM** | Lensless in-line reconstruction (angular spectrum, Kreuzer, realistic angular spectrum / DLHM-rec) with an optional reference hologram |
+| **Real-Time DHM** | Live off-axis reconstruction with Vortex / Vortex–Legendre compensation, automatic or manual (+1 order) filtering, live phase profiles with CSV recording, histogram, video and complex-field recording, and live camera exposure / gain |
+| **Real-Time DLHM** | Live lensless reconstruction (realistic angular spectrum) with linked L / z / r distances, histogram, video and complex-field recording, and live camera exposure / gain |
 
-Analysis tools (**QPI** and **Speckle**) open from the Offline modules' *Analysis tools*
-menu: phase profiles and speckle
+The **QPI** and **Speckle** analysis tools open from the offline modules' *Analysis tools* menu.
 
 ## Requirements
 
-- [Fiji](https://fiji.sc/) — the bundled Java 8 build is what this targets
-- A webcam or video file for the real-time modules 
-- To **build from source**: the JDK inside your Fiji install
-  (`Fiji.app/java/<platform>/<jdk>/bin/javac`)
+- [Fiji](https://fiji.sc/) with its bundled Java 8
+- [FFmpeg](https://ffmpeg.org/) on your `PATH`, for video input and MP4 / AVI recording
+  (still images, TIFF stacks and TIFF recordings work without it)
+- A camera that Windows / macOS / Linux exposes as a standard video device (e.g. USB
+  webcams, The Imaging Source DMK cameras, etc) for live acquisition
+- Live exposure, gain and the resolution list are **Windows only** (DirectShow)
 
 ## Install
 
-### Pre-built JAR
+### From the pre-built JAR
 
-1. Download `HoloBio_.jar` from this repository.
-2. Copy it into your Fiji plugins folder:
-   - **Windows:** `Fiji.app\plugins\HoloBio_.jar`
-   - **macOS / Linux:** `Fiji.app/plugins/HoloBio_.jar`
-3. For the real-time camera modules, also copy `lib/webcam-capture-0.3.12.jar` and
-   `lib/bridj-0.7.0.jar` into `Fiji.app/jars/`. 
+1. Copy `HoloBio_.jar` into `Fiji.app/plugins/`.
+2. If an older install left `webcam-capture-0.3.12.jar` or `bridj-0.7.0.jar` in
+   `Fiji.app/jars/`, delete them. Both are now bundled inside `HoloBio_.jar`.
+3. Restart Fiji.
+
+If QPI or Speckle fail to open, build from source (below): the build also installs
+`HoloBio-core.jar` into `Fiji.app/jars/`, which makes the analysis tools visible to every
+Fiji class loader.
+
+### From source (Windows)
+
+1. Open `build.ps1` and set `$FijiDir` to your Fiji folder, and `$Javac` / `$Jar` / `$IjJar`
+   to the JDK and `ij-*.jar` your Fiji ships.
+2. Close Fiji, then run `.\build.ps1` (or double-click `build.bat`).
+3. The script compiles `src/`, bundles jcobyla, webcam-capture and BridJ, runs an FFT
+   self-check, and installs `HoloBio_.jar` into `Fiji.app\plugins\` and `HoloBio-core.jar`
+   into `Fiji.app\jars\`.
 4. Restart Fiji.
 
 ## Use
 
 ### Offline
 
-1. **File ▸ Open** your hologram.
+1. **File ▸ Open** your hologram (or a stack for phase shifting).
 2. **Plugins ▸ HoloBio ▸ Offline DHM** (or **Offline DLHM**).
 3. **Use Active Image** to link the open image.
-4. Pick a submodule, set wavelength and pixel pitch in µm, and run the pipeline buttons.
-5. **Open All in Fiji** sends amplitude / phase / FT to normal Fiji windows; **Save**
-   writes FT, phase or amplitude as TIFF, or the reconstructed complex field as a NumPy
-   `.npy` (`complex64`).
+4. Choose a submodule, set wavelength and pixel pitch in µm, and run the pipeline.
+5. **Open All in Fiji** sends amplitude, phase and FT to Fiji windows. **Save** writes them
+   as TIFF, or the complex field as NumPy `.npy` (`complex64`).
 
 ### Real-time
 
 1. **Plugins ▸ HoloBio ▸ Real-Time DHM** (or **Real-Time DLHM**).
-2. In **Capture**, choose *Camera* (then **Refresh**) or *Video* (then **Browse…**).
-3. Set the values in **Optics**, then press **Start**.
-4. **Record** captures the selected product (phase, amplitude, or hologram) to an MP4.
-   **Record complex fields** saves every reconstructed field until you stop, as one
-   NumPy `.npz` (`frame_00000`, `frame_00001`, …). CAN BE HEAVY
-5. **Snap to Fiji** sends the current view to a normal Fiji window so you can apply Fiji tools to it.
-6. With a camera running  a **Camera** section appears under Capture with
-   **Exposure** (and *Auto*) and **Gain**. It starts from whatever the camera currently
-   holds and changes nothing until you move a control. Settings are stored by the camera
-   driver, not by HoloBio. ONLY WORKS IN WINDOWS
+2. In **Capture**, choose *Camera* (then **Refresh** and a **Resolution**; the largest is
+   selected by default) or *Video* (then **Browse…** for a video, still image or TIFF stack).
+3. Set **Optics** and press **Start**. Fields can be edited while running; each change
+   applies on the next frame and is confirmed in the status line.
+4. With a camera running on Windows, a **Camera** section shows **Exposure** (with *Auto*)
+   and **Gain**. It reads the camera's current values and changes nothing until you move a
+   control. Settings are stored by the camera driver, not by HoloBio. ONLY WORKS IN WINDOWS!!!
+5. **Histogram** (under Optics) opens a live intensity histogram of the raw hologram, with
+   its mean, SD, min and max, to help set exposure.
+6. **Record**:
+   - **Start recording** / **Stop and save…** records the hologram, amplitude or phase as
+     MP4, AVI or TIFF stack (up to 512 MB in memory). Holograms are always saved
+     **lossless**, so they can be reconstructed again later.
+   - **Record complex fields** / **Stop and save fields…** streams every reconstructed field
+     to a NumPy `.npz` (`frame_00000`, `frame_00001`, … as `complex64`). Files grow quickly;
+     frames are skipped (and counted) if the disk can't keep up.
+7. **Snap to Fiji** sends both current views to Fiji. Repeated snaps become time-stamped
+   slices of one stack per view.
+8. *(Real-Time DHM)* **Profile ▸ Live** draws lines or regions on the phase and plots their
+   phase profiles every frame; **Record…** / **Save…** writes Δφ per frame to CSV, and
+   **Load ROIs…** reads `rois_*.txt` files that have two x,y coords and draws a line between them. Used for validation.
 
 ## Project layout
 
 | Path | Purpose |
-|------|---------|
-| `src/` | Java source and `plugins.config` (the menu definition) |
-| `lib/` | Third-party JARs needed to build and to run the camera backends |
-| `build.ps1` / `build.bat` | Auto compile, self-check, and install into Fiji |
+|---|---|
+| `src/` | Java sources and `plugins.config` (menu definition) |
+| `lib/` | Third-party JARs bundled at build time, and their notices |
+| `build.ps1` / `build.bat` | Compile, self-check and install into Fiji |
 | `HoloBio_.jar` | Pre-built plugin |
+
 
 | Algorithm | File |
 |---|---|
@@ -91,30 +115,19 @@ menu: phase profiles and speckle
 | Multi-core splitting of row/column operations | `HoloBioParallel.java` |
 | microstructure statistics (UNFINISHED NOT IN UI) | `HoloBioMicrostructureMath.java` |
 
+## Third-party
 
-## Third-party libs
+Bundled into `HoloBio_.jar` 
 
-- [jcobyla](https://github.com/cureos/jcobyla) — COBYLA optimiser, bundled into the plugin JAR
-- [webcam-capture](https://github.com/sarxos/webcam-capture) + [BridJ](https://github.com/nativelibs4java/BridJ) — camera access for the real-time modules
-- [JNA](https://github.com/java-native-access/jna) — Windows DirectShow exposure / gain control (compile-time only; provided by Fiji)
+- [webcam-capture](https://github.com/sarxos/webcam-capture) 0.3.12 — camera access (MIT)
+- [BridJ](https://github.com/nativelibs4java/BridJ) 0.7.0 — native access for webcam-capture (BSD-3)
+- [jcobyla](https://github.com/xypron/jcobyla) 1.4 — COBYLA optimiser for BPS2 (MIT)
+
+Provided by Fiji: ImageJ, [JNA](https://github.com/java-native-access/jna) (DirectShow
+exposure / gain / resolution), Jama (AIA).
+
+External: [FFmpeg](https://ffmpeg.org/), run as a separate program for video.
 
 ---
 
-### Extra: Adding your own code and fast compiling 
-
-If you want to add your own functions and don't want to build and copy paste the .jar into Fiji everytime, you can use the build.bat or build.ps1 scripts for fast builts.
-
-0. Add whatever code you want to .java files under /src
-1. Open `build.ps1` and set `$FijiDir` to your Fiji folder, and `$Javac` / `$Jar` /
-   `$IjJar` to match the JDK and `ij-*.jar` versions your Fiji ships.
-2. Run:
-   ```powershell
-   .\build.ps1
-   ```
-   (or double-click `build.bat`)
-3. The script compiles `src/`, bundles the jcobyla classes, runs a self-check, then
-   installs `HoloBio_.jar` into `Fiji.app\plugins\`, copies the webcam runtime JARs into
-   `Fiji.app\jars\`, and installs `HoloBio-core.jar`. It will print every step and tell you if it was successful
-4. Restart Fiji.
-   
 Nancy Burgos, 2026. Contact me: ncburgosb@eafit.edu.co
