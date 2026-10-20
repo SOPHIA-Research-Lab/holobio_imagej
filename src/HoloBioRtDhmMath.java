@@ -58,10 +58,13 @@ public final class HoloBioRtDhmMath {
 
     // ── FT display buffer ─────────────────────────────────────────────────────
     private static float[] ftBuf;
+    private static float[] ftRowMin, ftRowMax;
     private static int     ftRows, ftCols;
 
     // ── Output buffers ────────────────────────────────────────────────────────
     private static float[] ampBuf, phaseBuf, phaseRadBuf;
+    /** Per-row amplitude min/max from the parallel demodulation pass. */
+    private static float[] rowMin, rowMax;
     /** Demodulated +1-order field of the last frame (before phase flattening). */
     private static float[] fieldReBuf, fieldImBuf;
     private static int     fieldRows, fieldCols;
@@ -429,34 +432,55 @@ public final class HoloBioRtDhmMath {
         float[] phase    = wantPhase     ? phaseBuf    : null;
         float[] phaseRad = wantPhase     ? phaseRadBuf : null;
 
-        float aMin = Float.MAX_VALUE, aMax = -Float.MAX_VALUE;
-
-        for (int r = 0; r < srcRows; r++) {
-            float cosY = rampCosY[r], sinY = rampSinY[r];
-            int si = (r + pad) * gCols + pad, di = r * srcCols;
-            for (int c = 0; c < srcCols; c++, si++, di++) {
-                    float fRe = re[si], fIm = im[si];
-                float rCos = rampCosX[c] * cosY - rampSinX[c] * sinY;
-                float rSin = rampSinX[c] * cosY + rampCosX[c] * sinY;
+        // Rows are independent, so the per-pixel pass (atan2 dominates: it is StrictMath on
+        // Java 8) is split across cores. Each row keeps its own min/max and they are reduced
+        // afterwards — min/max do not depend on order, so the output is bit-identical.
+        if (rowMin == null || rowMin.length < srcRows) {
+            rowMin = new float[srcRows];
+            rowMax = new float[srcRows];
+        }
+        final float[] fRe0 = re, fIm0 = im, fieldRe = fieldReBuf, fieldIm = fieldImBuf;
+        final float[] cX = rampCosX, sX = rampSinX, cY = rampCosY, sY = rampSinY;
+        final float[] ampW = amp, phaseW = phase;
+        final int gColsF = gCols, padF = pad, srcColsF = srcCols;
+        HoloBioParallel.forEachLine(srcRows, (from, to) -> {
+            for (int r = from; r < to; r++) {
+                float cosY = cY[r], sinY = sY[r];
+                float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;
+                int si = (r + padF) * gColsF + padF, di = r * srcColsF;
+                for (int c = 0; c < srcColsF; c++, si++, di++) {
+                    float fRe = fRe0[si], fIm = fIm0[si];
+                    float rCos = cX[c] * cosY - sX[c] * sinY;
+                    float rSin = sX[c] * cosY + cX[c] * sinY;
                     float oRe = fRe * rCos - fIm * rSin;
                     float oIm = fRe * rSin + fIm * rCos;
-                fieldReBuf[di] = oRe;
-                fieldImBuf[di] = oIm;
-                if (amp != null) {
-                    // Math.hypot guards against intermediate overflow at roughly 20× the
-                    // cost of sqrt; these magnitudes are nowhere near the float limits.
-                    float a = (float) Math.sqrt((double) oRe * oRe + (double) oIm * oIm);
-                    amp[di] = a;
-                    if (a < aMin) aMin = a;
-                    if (a > aMax) aMax = a;
+                    fieldRe[di] = oRe;
+                    fieldIm[di] = oIm;
+                    if (ampW != null) {
+                        // Math.hypot guards against intermediate overflow at roughly 20× the
+                        // cost of sqrt; these magnitudes are nowhere near the float limits.
+                        float a = (float) Math.sqrt((double) oRe * oRe + (double) oIm * oIm);
+                        ampW[di] = a;
+                        if (a < lo) lo = a;
+                        if (a > hi) hi = a;
+                    }
+                    if (phaseW != null) {
+                        phaseW[di] = (float) Math.atan2(oIm, oRe);
+                    }
                 }
-                if (phase != null) {
-                    phase[di] = (float) Math.atan2(oIm, oRe);
-                }
+                rowMin[r] = lo;
+                rowMax[r] = hi;
             }
-        }
+        });
 
-        if (amp != null) stretch(amp, aMin, aMax);
+        if (amp != null) {
+            float aMin = Float.MAX_VALUE, aMax = -Float.MAX_VALUE;
+            for (int r = 0; r < srcRows; r++) {
+                if (rowMin[r] < aMin) aMin = rowMin[r];
+                if (rowMax[r] > aMax) aMax = rowMax[r];
+            }
+            stretch(amp, aMin, aMax);
+        }
 
         if (phase != null) {
             if (flattenPhase) {
@@ -482,14 +506,18 @@ public final class HoloBioRtDhmMath {
             // parked every live profile that much below Python QPI. Python VL zeros the
             // Legendre constant on the spectral crop (background-dominated); this is the
             // fast equivalent. Still required: without any piston the wrap seam cuts the map.
-            float piston = backgroundPiston(phase, srcRows, srcCols);
-            float k = (float) (255.0 / (2.0 * Math.PI));
-            for (int i = 0, n = srcRows * srcCols; i < n; i++) {
-                float p = (float) Math.IEEEremainder(phase[i] - piston, 2 * Math.PI);
-                phaseRad[i] = p;
-                float v = (p + (float) Math.PI) * k;
-                phase[i] = v < 0f ? 0f : (v > 255f ? 255f : v);
-            }
+            final float piston = backgroundPiston(phase, srcRows, srcCols);
+            final float k = (float) (255.0 / (2.0 * Math.PI));
+            final float[] ph = phase, phR = phaseRad;
+            final int cols0 = srcCols;
+            HoloBioParallel.forEachLine(srcRows, (from, to) -> {
+                for (int i = from * cols0, n = to * cols0; i < n; i++) {
+                    float p = (float) Math.IEEEremainder(ph[i] - piston, 2 * Math.PI);
+                    phR[i] = p;
+                    float v = (p + (float) Math.PI) * k;
+                    ph[i] = v < 0f ? 0f : (v > 255f ? 255f : v);
+                }
+            });
         }
 
         // Embed the recon crop into the native frame size. Independent power-of-two crops
@@ -552,8 +580,12 @@ public final class HoloBioRtDhmMath {
         cRe = 0;
         cIm = 0;
         int count = 0;
+        final double twoPi = 2 * Math.PI, invTwoPi = 1.0 / twoPi;
         for (int i = 0; i < n; i += 2) {
-            if (Math.IEEEremainder(phase[i] - p0, 2 * Math.PI) > 0.25) continue;
+            // Same test as IEEEremainder(d, 2π) > 0.25, without StrictMath's per-call cost
+            // (this loop is serial and ran ~15 ms per 1280×960 frame).
+            double d = phase[i] - p0;
+            if (d - twoPi * Math.rint(d * invTwoPi) > 0.25) continue;
             cRe += Math.cos(phase[i]);
             cIm += Math.sin(phase[i]);
             count++;
@@ -663,44 +695,60 @@ public final class HoloBioRtDhmMath {
             ftBuf  = new float[len];
             ftRows = outRows; ftCols = outCols;
         }
-        float[] out = ftBuf;
-        int halfR = gRows / 2, halfC = gCols / 2;
-        float max = 0f, min = Float.MAX_VALUE;
+        final float[] out = ftBuf;
+        final int halfR = gRows / 2, halfC = gCols / 2;
+        if (ftRowMin == null || ftRowMin.length < outRows) {
+            ftRowMin = new float[outRows];
+            ftRowMax = new float[outRows];
+        }
+        final float[] rMin = ftRowMin, rMax = ftRowMax;
 
-        for (int dr = 0; dr < outRows; dr++) {
-            int sr0 = (int) ((long) dr * gRows / outRows);
-            int sr1 = (int) ((long) (dr + 1) * gRows / outRows);
-            if (sr1 <= sr0) sr1 = sr0 + 1;
-            if (sr1 > gRows) sr1 = gRows;
-            int rowBase = dr * outCols;
+        // Output rows are independent (log1p is StrictMath on Java 8 and dominated the frame
+        // when it ran serially); per-row min/max reduce afterwards, so output is unchanged.
+        HoloBioParallel.forEachLine(outRows, (from, to) -> {
+            for (int dr = from; dr < to; dr++) {
+                int sr0 = (int) ((long) dr * gRows / outRows);
+                int sr1 = (int) ((long) (dr + 1) * gRows / outRows);
+                if (sr1 <= sr0) sr1 = sr0 + 1;
+                if (sr1 > gRows) sr1 = gRows;
+                int rowBase = dr * outCols;
+                float rowHi = 0f, rowLo = Float.MAX_VALUE;
 
-            for (int dc = 0; dc < outCols; dc++) {
-                int sc0 = (int) ((long) dc * gCols / outCols);
-                int sc1 = (int) ((long) (dc + 1) * gCols / outCols);
-                if (sc1 <= sc0) sc1 = sc0 + 1;
-                if (sc1 > gCols) sc1 = gCols;
+                for (int dc = 0; dc < outCols; dc++) {
+                    int sc0 = (int) ((long) dc * gCols / outCols);
+                    int sc1 = (int) ((long) (dc + 1) * gCols / outCols);
+                    if (sc1 <= sc0) sc1 = sc0 + 1;
+                    if (sc1 > gCols) sc1 = gCols;
 
-                double acc = 0;
-                int n = 0;
-                for (int sr = sr0; sr < sr1; sr++) {
-                    int ur = sr + halfR;
-                    if (ur >= gRows) ur -= gRows;
-                    int base = ur * gCols;
-                    for (int sc = sc0; sc < sc1; sc++) {
-                        int uc = sc + halfC;
-                        if (uc >= gCols) uc -= gCols;
-                        int i = base + uc;
-                        double a = re[i], b = im[i];
-                        acc += Math.sqrt(a * a + b * b);
-                        n++;
+                    double acc = 0;
+                    int n = 0;
+                    for (int sr = sr0; sr < sr1; sr++) {
+                        int ur = sr + halfR;
+                        if (ur >= gRows) ur -= gRows;
+                        int base = ur * gCols;
+                        for (int sc = sc0; sc < sc1; sc++) {
+                            int uc = sc + halfC;
+                            if (uc >= gCols) uc -= gCols;
+                            int i = base + uc;
+                            double a = re[i], b = im[i];
+                            acc += Math.sqrt(a * a + b * b);
+                            n++;
+                        }
                     }
+                    float mag = (float) (acc / n);
+                    float v = logScale ? (float) Math.log1p(mag) : mag;
+                    out[rowBase + dc] = v;
+                    if (v > rowHi) rowHi = v;
+                    if (v < rowLo) rowLo = v;
                 }
-                float mag = (float) (acc / n);
-                float v = logScale ? (float) Math.log1p(mag) : mag;
-                out[rowBase + dc] = v;
-                if (v > max) max = v;
-                if (v < min) min = v;
+                rMin[dr] = rowLo;
+                rMax[dr] = rowHi;
             }
+        });
+        float max = 0f, min = Float.MAX_VALUE;
+        for (int dr = 0; dr < outRows; dr++) {
+            if (rMax[dr] > max) max = rMax[dr];
+            if (rMin[dr] < min) min = rMin[dr];
         }
 
         float lo = minMax ? min : 0f;

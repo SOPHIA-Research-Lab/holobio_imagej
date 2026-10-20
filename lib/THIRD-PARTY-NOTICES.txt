@@ -1,0 +1,14 @@
+HoloBio_.jar bundles the following third-party libraries, unmodified:
+
+webcam-capture 0.3.12
+  https://github.com/sarxos/webcam-capture
+  Copyright Bartosz Firyn and contributors. MIT License.
+  Its own bundled components' licences are under META-INF/3rd-party-licenses/.
+
+BridJ 0.7.0
+  https://github.com/nativelibs4java/BridJ
+  Copyright Olivier Chafik. BSD 3-Clause License.
+
+jcobyla 1.4
+  https://github.com/xypron/jcobyla
+  Copyright Anders Gustafsson, Cureos AB; Heinrich Schuchardt. MIT License.

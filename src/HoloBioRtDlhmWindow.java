@@ -47,6 +47,7 @@ public class HoloBioRtDlhmWindow extends JFrame {
 
     // --- Geometry / optics ---
     private JTextField        tfWavelength, tfPitch, tfL, tfZ, tfR;
+    private JTextField        tfStopAfterSec;
     private JCheckBox         cbFixR;
     /** Block size averaged before reconstruction; 1 = full resolution. */
     private volatile int      binning = DEF_BINNING;
@@ -232,6 +233,18 @@ public class HoloBioRtDlhmWindow extends JFrame {
 
         lblVideoName = HoloBioUiStyle.footerNote("No file chosen");
         p.add(lblVideoName, c); c.gridy++;
+
+        // Same control as RT DHM. This panel's rows are single-column, so the label/field
+        // pair gets its own small grid rather than adding a second column to the section.
+        tfStopAfterSec = new JTextField("0", 6);
+        tfStopAfterSec.setToolTipText("0 = play to the end. Otherwise stop once video time reaches this many seconds.");
+        HoloBioRtUtil.liveField(tfStopAfterSec, "Stop after", "s", HoloBioRtUtil.Rule.NON_NEGATIVE,
+                null, this::setStatus);
+        JPanel stopRow = new JPanel(new GridBagLayout());
+        stopRow.setOpaque(false);
+        HoloBioUiStyle.addLabelField(stopRow, HoloBioRtUtil.gbc(0), "Stop after (s)", tfStopAfterSec,
+                HoloBioUiStyle.FORM_LABEL_W_SM, HoloBioUiStyle.FORM_FIELD_W);
+        p.add(stopRow, c); c.gridy++;
 
         btnStart = HoloBioUiStyle.primaryButton("Start");
         btnStop  = HoloBioUiStyle.secondaryButton("Stop");
@@ -513,10 +526,10 @@ public class HoloBioRtDlhmWindow extends JFrame {
         p.setBorder(HoloBioUiStyle.sectionPad("Record"));
         GridBagConstraints c = HoloBioRtUtil.gbc(0);
 
-        // DLHM has no sideband FT product yet; keep Phase / Amplitude only for now.
         cbRecordTarget = new JComboBox<>(new HoloBioRtRecorder.Target[] {
                 HoloBioRtRecorder.Target.PHASE,
-                HoloBioRtRecorder.Target.AMPLITUDE
+                HoloBioRtRecorder.Target.AMPLITUDE,
+                HoloBioRtRecorder.Target.HOLOGRAM
         });
         cbRecordTarget.setSelectedItem(HoloBioRtRecorder.Target.PHASE);
         HoloBioUiStyle.stretchWidth(cbRecordTarget);
@@ -1040,6 +1053,11 @@ public class HoloBioRtDlhmWindow extends JFrame {
                 synchronized (frameLock) { buf = spareGray; spareGray = null; }
                 float[] gray = HoloBioRtUtil.toGray(frame, buf);
                 histogram.sample(gray, w, h);
+                // Every acquired frame, raw 0–255, before the buffer is handed to processing
+                if (recorder.isRecording() && recorder.target() == HoloBioRtRecorder.Target.HOLOGRAM) {
+                    recorder.add(HoloBioRtRecorder.Target.HOLOGRAM, gray, w, h);
+                    updateRecIndicator();
+                }
 
                 BufferedImage img = HoloBioRtUtil.grayImage(gray, w, h);
                 lastHologram = img;
@@ -1072,6 +1090,24 @@ public class HoloBioRtDlhmWindow extends JFrame {
                     if (readyGray == null) continue;
                     gray = readyGray; w = readyW; h = readyH;
                     readyGray = null;
+                }
+
+                // Optional early stop for long videos (source timeline from delivered frames)
+                double stopAfter = HoloBioRtUtil.parseDouble(tfStopAfterSec, 0.0);
+                if (stopAfter > 0 && source != null && source.needsPacing()) {
+                    double pos = source.positionSec();
+                    if (pos >= stopAfter) {
+                        running = false;
+                        final double posF = pos, limF = stopAfter;
+                        SwingUtilities.invokeLater(() -> {
+                            btnStart.setEnabled(true);
+                            btnStop .setEnabled(false);
+                            setStatus(String.format(
+                                    "Stopped after %.2f s (limit %.2f s).", posF, limF));
+                            synchronized (frameLock) { frameLock.notifyAll(); }
+                        });
+                        break;
+                    }
                 }
 
                 applyParamsFromUi();

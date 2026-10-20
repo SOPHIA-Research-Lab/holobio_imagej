@@ -34,6 +34,7 @@ The **QPI** and **Speckle** analysis tools open from the offline modules' *Analy
 
 ### From the pre-built JAR
 
+<<<<<<< HEAD
 1. Copy `HoloBio_.jar` into `Fiji.app/plugins/`.
 2. If an older install left `webcam-capture-0.3.12.jar` or `bridj-0.7.0.jar` in
    `Fiji.app/jars/`, delete them. 
@@ -49,6 +50,15 @@ The **QPI** and **Speckle** analysis tools open from the offline modules' *Analy
    self-check, and installs `HoloBio_.jar` into `Fiji.app\plugins\` and `HoloBio-core.jar`
    into `Fiji.app\jars\`.
 4. Restart Fiji.
+=======
+1. Download `HoloBio_.jar` from this repository.
+2. Copy it into your Fiji plugins folder:
+   - **Windows:** `Fiji.app\plugins\HoloBio_.jar`
+   - **macOS / Linux:** `Fiji.app/plugins/HoloBio_.jar`
+3. Restart Fiji. The camera libraries (webcam-capture and BridJ) are bundled inside
+   `HoloBio_.jar`; if an older install left `webcam-capture-0.3.12.jar` or
+   `bridj-0.7.0.jar` in `Fiji.app/jars/`, delete them.
+>>>>>>> 942bd9f (last changes, script to compare csv PP)
 
 Recommended if adding custom tools for fast compilation.
 
@@ -117,6 +127,7 @@ Recommended if adding custom tools for fast compilation.
 
 ## Third-party
 
+<<<<<<< HEAD
 Bundled into `HoloBio_.jar` 
 
 - [webcam-capture](https://github.com/sarxos/webcam-capture) 0.3.12 — camera access (MIT)
@@ -130,4 +141,29 @@ External: [FFmpeg](https://ffmpeg.org/), run as a separate program for video.
 
 ---
 
+=======
+- [jcobyla](https://github.com/cureos/jcobyla) — COBYLA optimiser, bundled into the plugin JAR
+- [webcam-capture](https://github.com/sarxos/webcam-capture) + [BridJ](https://github.com/nativelibs4java/BridJ) — camera access for the real-time modules, bundled into the plugin JAR (notices in `META-INF/THIRD-PARTY-NOTICES.txt`)
+- [JNA](https://github.com/java-native-access/jna) — Windows DirectShow exposure / gain control (compile-time only; provided by Fiji)
+
+---
+
+### Extra: Adding your own code and fast compiling (Windows)
+
+If you want to add your own functions and don't want to build and copy paste the .jar into Fiji everytime, you can use the build.bat or build.ps1 scripts for fast builts.
+
+0. Add whatever code you want to .java files under /src
+1. Open `build.ps1` and set `$FijiDir` to your Fiji folder, and `$Javac` / `$Jar` /
+   `$IjJar` to match the JDK and `ij-*.jar` versions your Fiji ships.
+2. Run:
+   ```powershell
+   .\build.ps1
+   ```
+   (or double-click `build.bat`)
+3. The script compiles `src/`, bundles jcobyla, webcam-capture and BridJ, runs a
+   self-check, then installs `HoloBio_.jar` into `Fiji.app\plugins\` and
+   `HoloBio-core.jar` into `Fiji.app\jars\` (removing old separate webcam/BridJ JARs there). It will print every step and tell you if it was successful
+4. Restart Fiji.
+   
+>>>>>>> 942bd9f (last changes, script to compare csv PP)
 Nancy Burgos, 2026. Contact me: ncburgosb@eafit.edu.co

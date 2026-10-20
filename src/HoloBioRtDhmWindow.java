@@ -379,6 +379,22 @@ public class HoloBioRtDhmWindow extends JFrame {
         writer.start();
     }
 
+    /**
+     * Hologram recording, called by the capture thread with every frame it acquires.
+     *
+     * <p>It used to run in the processing loop, which had two faults: only frames that were
+     * reconstructed got recorded (at 1280×960 that was ~1.6 of every camera second), and the
+     * copy was taken after the buffer had been handed back to the capture thread, so a frame
+     * could be overwritten mid-copy by the next one. Here every acquired frame is stored, with
+     * its raw 0–255 values (Python stretches each frame min–max; that changes the intensities
+     * frame to frame and is not needed to reconstruct).
+     */
+    private void recordHologram(float[] gray, int w, int h) {
+        if (!recorder.isRecording() || recorder.target() != HoloBioRtRecorder.Target.HOLOGRAM) return;
+        recorder.add(HoloBioRtRecorder.Target.HOLOGRAM, gray, w, h);
+        updateRecIndicator();
+    }
+
     private void updateRecIndicator() {
         if (!recorder.isRecording()) {
             if (recorder.hitBudget()) {
@@ -1346,6 +1362,7 @@ public class HoloBioRtDhmWindow extends JFrame {
                 synchronized (frameLock) { buf = spareGray; spareGray = null; }
                 float[] gray = HoloBioRtUtil.toGray(frame, buf);
                 histogram.sample(gray, w, h);
+                recordHologram(gray, w, h);
 
                 if (!showFourier) {
                     BufferedImage img = HoloBioRtUtil.grayImage(gray, w, h);
@@ -1474,13 +1491,8 @@ public class HoloBioRtDhmWindow extends JFrame {
                         && result.amplitude != null) {
                     recorder.add(recTarget, result.amplitude, result.width, result.height);
                     updateRecIndicator();
-                } else if (recTarget == HoloBioRtRecorder.Target.HOLOGRAM) {
-                    // Match Python: record the input grey frame (min–max → 0…255).
-                    float[] holoDisp = gray.clone();
-                    HoloBioRtUtil.stretchTo255(holoDisp, w * h);
-                    recorder.add(recTarget, holoDisp, w, h);
-                    updateRecIndicator();
                 }
+                // Holograms are recorded by the capture thread (recordHologram), not here.
 
                 if (!reportedGeometry) {
                     reportedGeometry = true;

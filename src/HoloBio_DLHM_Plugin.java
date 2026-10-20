@@ -1,7 +1,9 @@
+import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.plugin.PlugIn;
 import ij.process.FloatProcessor;
+import ij.process.ImageProcessor;
 
 import javax.swing.*;
 import java.awt.*;
@@ -436,8 +438,10 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
             fieldW = 0; fieldH = 0;
             ampImage = null; phaseImage = null;
             speckleState.clear();               // as Offline DHM: a new hologram starts afresh
-            showInFiji(holoImage, "DLHM Hologram");
-            setStatus("Hologram loaded: " + holoW + "×" + holoH + " px  |  " + imp.getTitle());
+            // Link only, as Offline DHM does: the hologram is already open in Fiji, so opening
+            // a copy of it as "DLHM Hologram" just put the same image on screen twice.
+            setStatus("Hologram linked: " + imp.getTitle() + "  (" + holoW + "×" + holoH + " px)");
+            IJ.showStatus("HoloBio: hologram linked.");
             log("Loaded: " + imp.getTitle() + " (" + holoW + "×" + holoH + ")");
         } catch (Exception ex) {
             log("Load error: " + ex);
@@ -775,8 +779,29 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
         return snap;
     }
 
+    /**
+     * Show {@code imp} as the Fiji image called {@code title}. If that window is already open
+     * with the same size, its pixels are replaced in place; a new window is opened only the
+     * first time or when the size changes. Closing and reopening the window on every
+     * reconstruction made amplitude/phase pop up again each time, and destroying and creating
+     * native windows is what crashed the Intel graphics driver on the development machine.
+     */
     private void showInFiji(ImagePlus imp, String title) {
         ImagePlus existing = WindowManager.getImage(title);
+        if (existing != null && existing.getWindow() != null && !existing.getWindow().isClosed()
+                && existing.getStackSize() == 1
+                && existing.getWidth() == imp.getWidth() && existing.getHeight() == imp.getHeight()) {
+            final ImageProcessor ip = imp.getProcessor().duplicate();
+            Runnable update = () -> {
+                existing.setProcessor(ip);
+                existing.resetDisplayRange();
+                existing.updateAndDraw();
+                existing.changes = false;
+            };
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) update.run();
+            else javax.swing.SwingUtilities.invokeLater(update);
+            return;
+        }
         if (existing != null) { existing.changes = false; existing.close(); }
         ImagePlus out = imp.duplicate();
         out.setTitle(title);

@@ -38,10 +38,14 @@ if ($javacExit -ne 0) { Write-Error 'Compilation failed.' }
 
 Write-Host '[3/5] Packaging JAR...'
 Copy-Item -LiteralPath (Join-Path $SrcDir 'plugins.config') -Destination (Join-Path $BuildDir 'plugins.config') -Force
-# Unpack cobyla classes so they are bundled inside the plugin JAR
+# Unpack cobyla, webcam-capture and BridJ so they are bundled inside the plugin JAR
+# (and the helper JAR below, which is packed from the same folder).
 Push-Location -LiteralPath $BuildDir
 & $Jar xf $CobylaJar
+& $Jar xf $WebcamJar
+& $Jar xf $BridjJar
 Pop-Location
+Copy-Item -LiteralPath (Join-Path $Root 'lib\THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $BuildDir 'META-INF\THIRD-PARTY-NOTICES.txt') -Force
 Push-Location -LiteralPath $BuildDir
 try {
     & $Jar cf $OutJar .
@@ -63,29 +67,20 @@ Write-Host '[5/5] Installing to Fiji plugins folder...'
 $FijiPlugins = Join-Path $FijiDir 'plugins\HoloBio_.jar'
 Copy-Item -LiteralPath $OutJar -Destination $FijiPlugins -Force
 
-# Webcam-capture runtime libs — Fiji loads all JARs from its jars/ directory
-Write-Host '      Copying webcam-capture runtime JARs to Fiji jars/...'
+# webcam-capture and BridJ are now inside HoloBio_.jar, and the HoloBio-core.jar helper is no
+# longer needed (HoloBioFijiUi loads the QPI / Speckle dialogs from the plugin JAR itself).
+# Remove copies left in jars/ by older builds so Fiji does not see the same classes twice.
 $FijiJars = Join-Path $FijiDir 'jars'
-Copy-Item -LiteralPath $WebcamJar -Destination (Join-Path $FijiJars 'webcam-capture-0.3.12.jar') -Force
-Copy-Item -LiteralPath $BridjJar  -Destination (Join-Path $FijiJars 'bridj-0.7.0.jar')           -Force
-
-# Helper classes (QPI / Speckle) must also live on Fiji's application classpath.
-# Fiji can define plugin classes on AppClassLoader, which does not search plugins/*.jar.
-# Omit plugins.config so this copy does not register a second HoloBio menu.
-Write-Host '      Installing HoloBio-core.jar to Fiji jars/ (analysis tools)...'
-$CoreJar = Join-Path $FijiJars 'HoloBio-core.jar'
-$pluginsConfig = Join-Path $BuildDir 'plugins.config'
-if (Test-Path -LiteralPath $pluginsConfig) {
-    Remove-Item -LiteralPath $pluginsConfig -Force
-}
-Push-Location -LiteralPath $BuildDir
-try {
-    & $Jar cf $CoreJar .
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'HoloBio-core.jar creation failed.'
+foreach ($old in @('webcam-capture-0.3.12.jar', 'bridj-0.7.0.jar', 'HoloBio-core.jar')) {
+    $p = Join-Path $FijiJars $old
+    if (Test-Path -LiteralPath $p) {
+        Write-Host ('      Removing from Fiji jars/: ' + $old)
+        try {
+            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+        } catch {
+            Write-Warning ('Could not remove ' + $old + ' (is Fiji running?). Close Fiji and delete it by hand.')
+        }
     }
-} finally {
-    Pop-Location
 }
 
 Write-Host ''
