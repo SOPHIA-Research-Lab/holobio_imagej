@@ -82,10 +82,9 @@ ffmpeg -version
 
 ## 2. Install Fiji
 
-### Step 1. Install Fiji
 If Fiji is already installed, skip this step.
 
-## Windows
+### Windows
 https://imagej.net/software/fiji/downloads
 
 #### Linux
@@ -101,7 +100,7 @@ Extract the archive into your home directory:
 
    This should create the `~/Fiji.app/` directory.
 
-### Step 2. Install the HoloBio plugin
+## 3. Install the HoloBio plugin
 
 #### Windows
 
@@ -119,7 +118,7 @@ curl -fL -o ~/Fiji.app/plugins/HoloBio_.jar \
     https://raw.githubusercontent.com/SOPHIA-Research-Lab/holobio_imagej/main/HoloBio_.jar
 ```
 
-### Step 3. Restart Fiji.
+## 4. Restart Fiji.
 
 Note: The Offline modules and the Video options work in Linux. Live acquisition in Linux is still experimental and might need extra driver set up and configuration depending of your camera.
 
