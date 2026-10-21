@@ -1344,12 +1344,13 @@ public class HoloBioRtDhmWindow extends JFrame {
 
                 if (frame == null) {
                     if (paceCapture && (source == null || !source.isStill())) {
+                        final String why = source != null ? source.failure() : null;
                         SwingUtilities.invokeLater(() -> {
                             running = false;
                             btnStart.setEnabled(true);
                             btnStop .setEnabled(false);
                             if (csvRec.isRecording()) stopProfileRecording(true);
-                            else lblStatus.setText("Video ended.");
+                            else lblStatus.setText(why != null ? why : "Video ended.");
                         });
                         return;
                     }

@@ -1036,11 +1036,12 @@ public class HoloBioRtDlhmWindow extends JFrame {
                 BufferedImage frame = source != null ? source.next() : null;
                 if (frame == null) {
                     if (paceCapture) {
+                        final String why = source != null ? source.failure() : null;
                         SwingUtilities.invokeLater(() -> {
                             running = false;
                             btnStart.setEnabled(true);
                             btnStop .setEnabled(false);
-                            lblStatus.setText("Video ended.");
+                            lblStatus.setText(why != null ? why : "Video ended.");
                         });
                         return;
                     }

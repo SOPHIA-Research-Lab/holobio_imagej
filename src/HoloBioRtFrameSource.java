@@ -183,6 +183,9 @@ public final class HoloBioRtFrameSource implements Closeable {
 
     public String description() { return description; }
 
+    /** Message explaining why a video produced no frames (FFmpeg failed), or null. */
+    public String failure() { return ffmpeg != null ? ffmpeg.failure : null; }
+
     @Override
     public void close() {
         if (ffmpeg != null) ffmpeg.close();
@@ -218,6 +221,13 @@ public final class HoloBioRtFrameSource implements Closeable {
         private InputStream in;
         private final byte[] frameBuffer;
         private int          emitted;
+        private int          openedAt;
+        /** Why decoding produced no frames at all, or null. */
+        volatile String      failure;
+        private StringBuilder stderrTail = new StringBuilder();
+        private Thread       stderrDrain;
+        /** Set once an FFmpeg build turns out not to know -fps_mode (older than 5.1). */
+        private static volatile boolean legacyVsync;
 
         Ffmpeg(String path, int maxSide, int startFrame) throws IOException {
             this.path = path;
@@ -243,6 +253,7 @@ public final class HoloBioRtFrameSource implements Closeable {
 
         void seekToFrame(int frame) throws IOException {
             close();
+            failure = null;
             openAt(Math.max(0, frame));
         }
 
@@ -269,21 +280,44 @@ public final class HoloBioRtFrameSource implements Closeable {
                 cmd.add("-frames:v");
                 cmd.add(Integer.toString(remaining));
             }
-            cmd.add("-vsync");
-            cmd.add("0");
+            // One output frame per input frame. "-vsync 0" did this until FFmpeg deprecated it
+            // (5.1) and newer builds reject it, which made ffmpeg exit at once and every video
+            // look empty ("Video ended"). Use -fps_mode, falling back to -vsync on old builds.
+            if (legacyVsync) {
+                cmd.add("-vsync");
+                cmd.add("0");
+            } else {
+                cmd.add("-fps_mode");
+                cmd.add("passthrough");
+            }
             cmd.add("-f");
             cmd.add("rawvideo");
             cmd.add("-pix_fmt");
             cmd.add("gray");
             cmd.add("pipe:1");
             proc = new ProcessBuilder(cmd).start();
-            drain(proc.getErrorStream(), "ffmpeg-stderr");
+            stderrTail = new StringBuilder();
+            stderrDrain = drainTo(proc.getErrorStream(), stderrTail, "ffmpeg-stderr");
             in = new BufferedInputStream(proc.getInputStream(), 1 << 20);
+            openedAt = startFrame;
         }
 
         BufferedImage next() throws IOException {
+            if (failure != null) return null;
             if (knownFrames > 0 && emitted >= knownFrames) return null;
-            if (!readFully(frameBuffer)) return null;
+            if (!readFully(frameBuffer)) {
+                if (emitted > openedAt) return null;          // played to the end
+                // Not a single frame since ffmpeg started: it failed, it did not "end".
+                String err = ffmpegError();
+                if (!legacyVsync && err.contains("fps_mode")) {
+                    legacyVsync = true;                       // FFmpeg older than 5.1
+                    close();
+                    openAt(openedAt);
+                    return next();
+                }
+                failure = "FFmpeg could not decode the video" + (err.isEmpty() ? "." : ": " + err);
+                return null;
+            }
             emitted++;
             BufferedImage img = new BufferedImage(frameWidth, frameHeight,
                     BufferedImage.TYPE_BYTE_GRAY);
@@ -374,6 +408,43 @@ public final class HoloBioRtFrameSource implements Closeable {
             while (n < buf.length && (r = is.read(buf, n, buf.length - n)) > 0) n += r;
             p.destroy();
             return new String(buf, 0, n).trim();
+        }
+
+        /** Last useful line of ffmpeg's stderr, once it has exited (waits up to 2 s). */
+        private String ffmpegError() {
+            try {
+                if (proc != null) proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
+                if (stderrDrain != null) stderrDrain.join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            String last = "";
+            synchronized (stderrTail) {
+                for (String line : stderrTail.toString().split("\\r?\\n")) {
+                    String t = line.trim();
+                    if (!t.isEmpty()) last = t;
+                }
+            }
+            return last.length() > 300 ? last.substring(0, 300) + "…" : last;
+        }
+
+        /** Keep the tail of a stream (last ~8 kB) so a failure can be reported. */
+        private static Thread drainTo(InputStream s, StringBuilder sink, String name) {
+            Thread t = new Thread(() -> {
+                try {
+                    byte[] b = new byte[4096];
+                    int n;
+                    while ((n = s.read(b)) != -1) {
+                        synchronized (sink) {
+                            sink.append(new String(b, 0, n, java.nio.charset.StandardCharsets.UTF_8));
+                            if (sink.length() > 8192) sink.delete(0, sink.length() - 8192);
+                        }
+                    }
+                } catch (IOException ignored) { /* process exited */ }
+            }, name);
+            t.setDaemon(true);
+            t.start();
+            return t;
         }
 
         private static void drain(InputStream s, String name) {
