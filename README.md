@@ -87,7 +87,7 @@ If Fiji is already installed, skip this step.
 ### Windows
 https://imagej.net/software/fiji/downloads
 
-#### Linux
+### Linux
 Download the latest Fiji distribution with Java included:
    ```bash
    curl -fL -o ~/fiji-latest-linux64-jdk.zip \
@@ -102,7 +102,7 @@ Extract the archive into your home directory:
 
 ## 3. Install the HoloBio plugin
 
-#### Windows
+### Windows
 
 1. Locate your `Fiji.app` installation directory.
 2. Download and copy `HoloBio_.jar` into:
@@ -110,7 +110,7 @@ Extract the archive into your home directory:
    Fiji.app/plugins/
    ```
    
-#### Linux
+### Linux
 
 If Fiji is installed in `~/Fiji.app/`, run:
 ```bash
