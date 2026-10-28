@@ -1,4 +1,4 @@
-# HoloBio ImageJ plugin build (PowerShell; handles paths with spaces).
+﻿# HoloBio ImageJ plugin build (PowerShell; handles paths with spaces).
 $ErrorActionPreference = 'Stop'
 
 $Root = $PSScriptRoot
@@ -65,7 +65,17 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host '[5/5] Installing to Fiji plugins folder...'
 $FijiPlugins = Join-Path $FijiDir 'plugins\HoloBio_.jar'
-Copy-Item -LiteralPath $OutJar -Destination $FijiPlugins -Force
+# Replacing the JAR under a running Fiji breaks classes it has not loaded yet
+# (NoClassDefFoundError), so install only when Fiji is closed.
+$FijiRunning = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -match '^(fiji|ImageJ)' }
+if ($FijiRunning) {
+    Write-Host ''
+    Write-Host '      Fiji is running: NOT installed (the running Fiji would break).' -ForegroundColor Yellow
+    Write-Host '      Close Fiji and run build.ps1 again to install.' -ForegroundColor Yellow
+} else {
+    Copy-Item -LiteralPath $OutJar -Destination $FijiPlugins -Force
+}
 
 # webcam-capture and BridJ are now inside HoloBio_.jar, and the HoloBio-core.jar helper is no
 # longer needed (HoloBioFijiUi loads the QPI / Speckle dialogs from the plugin JAR itself).
@@ -87,6 +97,6 @@ Write-Host ''
 Write-Host '============================================'
 Write-Host 'BUILD SUCCESSFUL'
 Write-Host ('JAR: ' + $OutJar)
-Write-Host ('Installed to: ' + $FijiPlugins)
+if (-not $FijiRunning) { Write-Host ('Installed to: ' + $FijiPlugins) }
 Write-Host '============================================'
 Write-Host 'Restart Fiji to use the plugin.'

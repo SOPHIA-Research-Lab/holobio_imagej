@@ -1,5 +1,6 @@
 /**
- * Power-of-two FFT and angular-spectrum / Fresnel propagation (square and rectangular grids) for the DHM plugin.
+ * Angular-spectrum / Fresnel propagation for the DHM plugin. The rectangular versions accept any
+ * grid size (HoloBioRectFft: radix-2 or Bluestein); the square ones are kept for power-of-two callers.
  */
 public final class HoloBioPropagationMath {
 
@@ -104,13 +105,20 @@ public final class HoloBioPropagationMath {
     }
 
     /**
-     * Angular spectrum on an M×N grid (row-major: index = y * width + x). M and N must be powers of two.
-     * Matches {@code pyDHM_methods.angularSpectrum} with {@code dfx = 1/(dx*N)}, {@code dfy = 1/(dy*M)}.
+     * Angular spectrum on an M×N grid of any size (row-major: index = y * width + x), matching
+     * {@code pyDHM_methods.angularSpectrum}: fftshift → fft2 → fftshift, multiply by
+     * exp(i·2π·z·kz), then ifftshift → ifft2 → ifftshift. Frequencies use the physical axis
+     * lengths ({@code dfx = 1/(dx·width)}, {@code dfy = 1/(dy·height)}).
+     *
+     * <p>z = 0 returns the field unchanged (exactly, not through two FFTs). Negative z propagates
+     * backwards. Evanescent components (only present when the pitch is below λ/2) are damped by
+     * exp(−2π·|z|·|kz|) in both directions; damping by z itself would amplify them without bound
+     * for z &lt; 0.
      */
     public static void propagateAngularSpectrumInPlaceRect(float[] re, float[] im, int height, int width, double zUm,
                                                              double wavelengthUm, double dxUm, double dyUm) {
-        if (!HoloBioRectFft.isPowerOfTwo(height) || !HoloBioRectFft.isPowerOfTwo(width)) {
-            throw new IllegalArgumentException("Angular spectrum (rect) requires power-of-two height and width.");
+        if (zUm == 0.0) {
+            return;
         }
         int m = height;
         int n = width;
@@ -129,19 +137,17 @@ public final class HoloBioPropagationMath {
                 double fx = (x - n / 2.0) / (dx * n);
                 double val = (1.0 / (wavelength * wavelength)) - (fx * fx + fy * fy);
                 int idx = y * n + x;
-                double kzRe;
-                double kzIm;
+                double c;
+                double s;
                 if (val >= 0.0) {
-                    kzRe = Math.sqrt(val);
-                    kzIm = 0.0;
+                    double phaseOsc = 2.0 * Math.PI * z * Math.sqrt(val);
+                    c = Math.cos(phaseOsc);
+                    s = Math.sin(phaseOsc);
                 } else {
-                    kzRe = 0.0;
-                    kzIm = Math.sqrt(-val);
+                    double damp = Math.exp(-2.0 * Math.PI * Math.abs(z) * Math.sqrt(-val));
+                    c = damp;
+                    s = 0.0;
                 }
-                double phaseOsc = 2.0 * Math.PI * z * kzRe;
-                double damp = Math.exp(-2.0 * Math.PI * z * kzIm);
-                double c = damp * Math.cos(phaseOsc);
-                double s = damp * Math.sin(phaseOsc);
                 float rr = re[idx];
                 float ii = im[idx];
                 re[idx] = (float) (rr * c - ii * s);
@@ -149,18 +155,20 @@ public final class HoloBioPropagationMath {
             }
         }
 
-        HoloBioRectFft.fftShift2d(re, im, m, n);
+        HoloBioRectFft.ifftShift2d(re, im, m, n);
         HoloBioRectFft.ifft2d(re, im, m, n);
-        HoloBioRectFft.fftShift2d(re, im, m, n);
+        HoloBioRectFft.ifftShift2d(re, im, m, n);
     }
 
     /**
-     * Fresnel propagation on M×N (powers of two), matching {@code pyDHM_methods.fresnel} indexing.
+     * Fresnel propagation on M×N of any size, matching {@code pyDHM_methods.fresnel} (single
+     * forward FFT with input/output chirps). z = 0 returns the field unchanged (the Fresnel
+     * kernel is singular there); negative z is accepted.
      */
     public static void propagateFresnelInPlaceRect(float[] re, float[] im, int height, int width, double zUm,
                                                    double wavelengthUm, double dxUm, double dyUm) {
-        if (!HoloBioRectFft.isPowerOfTwo(height) || !HoloBioRectFft.isPowerOfTwo(width)) {
-            throw new IllegalArgumentException("Fresnel (rect) requires power-of-two height and width.");
+        if (zUm == 0.0) {
+            return;
         }
         int m = height;
         int n = width;

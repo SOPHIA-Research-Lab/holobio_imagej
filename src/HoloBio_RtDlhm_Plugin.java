@@ -5,6 +5,7 @@ import javax.swing.SwingUtilities;
 public class HoloBio_RtDlhm_Plugin implements PlugIn {
     @Override
     public void run(String arg) {
+        HoloBioClassPreload.preloadAll();
         SwingUtilities.invokeLater(() -> new HoloBioRtDlhmWindow().setVisible(true));
     }
 }

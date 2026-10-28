@@ -2,6 +2,10 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
 import ij.gui.Roi;
+import ij.gui.OvalRoi;
+import ij.gui.Overlay;
+import ij.gui.Plot;
+import ij.ImageListener;
 import ij.plugin.PlugIn;
 import ij.process.ByteProcessor;
 import ij.process.FloatProcessor;
@@ -75,10 +79,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             float[] px = (float[]) filtered0255.getPixels();
             if (amplitudeChannel) {
                 speckleState.setFilteredAmplitude(px);
-                state.setAmplitudeImage(new ImagePlus("Amplitude", cropToSource(filtered0255)));
+                state.setAmplitudeImage(new ImagePlus("Amplitude", filtered0255));
             } else {
                 speckleState.setFilteredPhase(px);
-                state.setPhaseImage(new ImagePlus("Phase", cropToSource(filtered0255)));
+                state.setPhaseImage(new ImagePlus("Phase", filtered0255));
             }
             update_right_view();
         }
@@ -90,9 +94,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             currentFieldIm = fieldIm;
             currentFieldW = w;
             currentFieldH = h;
-            int canvasW = srcWidth > 0 ? srcWidth : w;
-            int canvasH = srcHeight > 0 ? srcHeight : h;
-            renderCurrentFieldWithoutPropagation(canvasW, canvasH);
+            renderCurrentFieldWithoutPropagation();
             float[] disp = (float[]) display0255.getPixels();
             if (amplitudeChannel) {
                 speckleState.setFilteredAmplitude(disp);
@@ -165,9 +167,29 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     /** Width and height of {@link #currentFieldRe} / {@link #currentFieldIm} (powers of two after compensation). */
     private int currentFieldW;
     private int currentFieldH;
+    /** Base name of the linked hologram (title without extension); prefixes every output title. */
+    private String holoBaseName = "Hologram";
+    /** The Fiji image linked with Use Active Image. Closing it clears the plugin state (fix 8). */
+    private ImagePlus linkedImage;
+    private ImageListener linkedImageListener;
+    /** Spatial filter controls (Phase Compensation, fix 10). */
+    private JComboBox<String> cbMaskShape;
+    private JComboBox<String> cbMaskSize;
+    private JTextField tfMaskCx;
+    private JTextField tfMaskCy;
+    private JTextField tfMaskR;
+    private JTextField tfMaskW;
+    private JTextField tfMaskH;
+    private JPanel maskCircleRows;
+    private JPanel maskRectRows;
+    private JPanel maskCentreRows;
+    /** Last spatial filter applied and the grid it was applied on, for the filter visualization. */
+    private HoloBioCompensationAlgorithms.FilteredOrder lastMask;
+    private FloatProcessor lastMaskGrid;
 
     @Override
     public void run(String arg) {
+        HoloBioClassPreload.preloadAll();
         SwingUtilities.invokeLater(this::createAndShowGUI);
     }
 
@@ -257,6 +279,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void showModuleCard(String name) {
+        if ("NUM_PROP".equals(name) && tfNpLambda != null && tfNpLambda.getText().trim().isEmpty()) {
+            tfNpLambda.setText(tfPcLambda.getText().trim());
+            tfNpPitchX.setText(tfPcPitchX.getText().trim());
+            tfNpPitchY.setText(tfPcPitchY.getText().trim());
+        }
         CardLayout layout = (CardLayout) moduleCards.getLayout();
         layout.show(moduleCards, name);
         moduleCards.revalidate();
@@ -368,7 +395,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         content.add(paramsPanel, gbc);
         gbc.gridy++;
 
-        JPanel actions = HoloBioUiStyle.flowLeft();
+        content.add(buildSpatialFilterPanel(), gbc);
+        gbc.gridy++;
+
+        // Compensate sits on the right, where the primary action of each panel is (fix 7).
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        actions.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 48));
         btnCompensate = HoloBioUiStyle.primaryButton("Compensate");
         btnCompensate.setToolTipText("Run the selected compensation method on the linked hologram.");
         btnCompensate.addActionListener(e ->
@@ -382,6 +414,119 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         panel.add(content, BorderLayout.NORTH);
         panel.add(propOptionsPc.root, BorderLayout.SOUTH);
         return panel;
+    }
+
+    /**
+     * Spatial filter: circular or rectangular mask, sized automatically (half-size = distance from
+     * DC to the +1 order / 3, the HoloBio Python default) or manually, in pixels of the hologram's
+     * centred spectrum as shown by Spatial Filter Visualization (fix 10).
+     */
+    private JPanel buildSpatialFilterPanel() {
+        JPanel sec = HoloBioUiStyle.formSection("Spatial filter");
+        GridBagConstraints c = HoloBioUiStyle.formGbc();
+        cbMaskShape = new JComboBox<>(new String[] {"Circular", "Rectangular"});
+        cbMaskSize = new JComboBox<>(new String[] {"Automatic", "Manual"});
+        cbMaskShape.setLightWeightPopupEnabled(false);
+        cbMaskSize.setLightWeightPopupEnabled(false);
+        setFixedControlSize(cbMaskShape, FORM_COMBO_W + 18);
+        setFixedControlSize(cbMaskSize, FORM_COMBO_W + 18);
+        cbMaskShape.setToolTipText("Shape of the mask that isolates the +1 order.");
+        cbMaskSize.setToolTipText("Automatic: centred on the +1 peak, half-size = distance to DC / 3. "
+                + "Manual: centre and size entered below (pixels of the spectrum shown by Spatial Filter Visualization).");
+        HoloBioUiStyle.addLabelField(sec, c, "Mask shape", cbMaskShape);
+        HoloBioUiStyle.addLabelField(sec, c, "Mask size", cbMaskSize);
+        tfMaskCx = new JTextField("", FIELD_COLS);
+        tfMaskCy = new JTextField("", FIELD_COLS);
+        tfMaskR = new JTextField("", FIELD_COLS);
+        tfMaskW = new JTextField("", FIELD_COLS);
+        tfMaskH = new JTextField("", FIELD_COLS);
+        maskCentreRows = new JPanel(new GridBagLayout());
+        GridBagConstraints cc = HoloBioUiStyle.formGbc();
+        HoloBioUiStyle.addLabelField(maskCentreRows, cc, "Centre X (px)", tfMaskCx);
+        HoloBioUiStyle.addLabelField(maskCentreRows, cc, "Centre Y (px)", tfMaskCy);
+        maskCircleRows = new JPanel(new GridBagLayout());
+        GridBagConstraints rc = HoloBioUiStyle.formGbc();
+        HoloBioUiStyle.addLabelField(maskCircleRows, rc, "Radius (px)", tfMaskR);
+        maskRectRows = new JPanel(new GridBagLayout());
+        GridBagConstraints wc = HoloBioUiStyle.formGbc();
+        HoloBioUiStyle.addLabelField(maskRectRows, wc, "Width (px)", tfMaskW);
+        HoloBioUiStyle.addLabelField(maskRectRows, wc, "Height (px)", tfMaskH);
+        c.gridx = 0;
+        c.gridwidth = 2;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        sec.add(maskCentreRows, c);
+        c.gridy++;
+        sec.add(maskCircleRows, c);
+        c.gridy++;
+        sec.add(maskRectRows, c);
+        cbMaskShape.addActionListener(e -> syncMaskRows());
+        cbMaskSize.addActionListener(e -> {
+            prefillManualMaskFromLast();
+            syncMaskRows();
+        });
+        syncMaskRows();
+        return sec;
+    }
+
+    private void syncMaskRows() {
+        boolean manual = "Manual".equals(cbMaskSize.getSelectedItem());
+        boolean circle = "Circular".equals(cbMaskShape.getSelectedItem());
+        maskCentreRows.setVisible(manual);
+        maskCircleRows.setVisible(manual && circle);
+        maskRectRows.setVisible(manual && !circle);
+        java.awt.Window w = SwingUtilities.getWindowAncestor(maskCentreRows);
+        if (w != null) {
+            maskCentreRows.getParent().revalidate();
+            packWindow(w);
+        }
+    }
+
+    /** When switching to Manual, start from the mask last applied (in hologram-spectrum pixels). */
+    private void prefillManualMaskFromLast() {
+        if (!"Manual".equals(cbMaskSize.getSelectedItem()) || lastMask == null || srcWidth <= 0
+                || !tfMaskCx.getText().trim().isEmpty()) {
+            return;
+        }
+        double sx = srcWidth / (double) lastMask.gridW;
+        double sy = srcHeight / (double) lastMask.gridH;
+        tfMaskCx.setText(String.format(java.util.Locale.US, "%.1f", srcWidth / 2.0 + (lastMask.fx - lastMask.gridW / 2.0) * sx));
+        tfMaskCy.setText(String.format(java.util.Locale.US, "%.1f", srcHeight / 2.0 + (lastMask.fy - lastMask.gridH / 2.0) * sy));
+        tfMaskR.setText(String.format(java.util.Locale.US, "%.1f", lastMask.maskRx * sx));
+        tfMaskW.setText(String.format(java.util.Locale.US, "%.1f", 2 * lastMask.maskRx * sx));
+        tfMaskH.setText(String.format(java.util.Locale.US, "%.1f", 2 * lastMask.maskRy * sy));
+    }
+
+    /**
+     * The mask chosen in the panel, for a hologram of {@code w×h}. Manual sizes are in pixels of
+     * that hologram's centred spectrum. Returns null (after a message) when a manual value is invalid.
+     */
+    private HoloBioCompensationAlgorithms.MaskSpec readMaskSpec(int w, int h) {
+        boolean circle = cbMaskShape == null || "Circular".equals(cbMaskShape.getSelectedItem());
+        if (cbMaskSize == null || !"Manual".equals(cbMaskSize.getSelectedItem())) {
+            return HoloBioCompensationAlgorithms.MaskSpec.auto(circle);
+        }
+        try {
+            double cx = Double.parseDouble(tfMaskCx.getText().trim());
+            double cy = Double.parseDouble(tfMaskCy.getText().trim());
+            double rx;
+            double ry;
+            if (circle) {
+                rx = Double.parseDouble(tfMaskR.getText().trim());
+                ry = rx;
+            } else {
+                rx = Double.parseDouble(tfMaskW.getText().trim()) / 2.0;
+                ry = Double.parseDouble(tfMaskH.getText().trim()) / 2.0;
+            }
+            if (rx <= 0 || ry <= 0 || cx < 0 || cy < 0 || cx >= w || cy >= h) {
+                HoloBioFijiUi.message("HoloBio", "Manual spatial filter: the centre must lie inside the "
+                        + w + "x" + h + " spectrum and the size must be greater than zero.");
+                return null;
+            }
+            return HoloBioCompensationAlgorithms.MaskSpec.manualPx(circle, cx, cy, rx, ry, w, h);
+        } catch (NumberFormatException ex) {
+            HoloBioFijiUi.message("HoloBio", "Manual spatial filter: enter numeric centre and size values.");
+            return null;
+        }
     }
 
     private JPanel init_phase_shifting_frame() {
@@ -609,16 +754,17 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private JPanel buildBottomBar() {
         JButton resetButton = HoloBioUiStyle.tertiaryButton("Reset");
-        JButton openOutputsButton = HoloBioUiStyle.secondaryButton("Open Outputs");
+        JButton openOutputsButton = HoloBioUiStyle.secondaryButton("Spatial Filter Visualization");
         JButton saveButton = HoloBioUiStyle.secondaryButton("Save…");
         btnApply = HoloBioUiStyle.primaryButton("Apply");
 
         resetButton.setToolTipText("Clear the linked hologram and reconstructed outputs.");
-        openOutputsButton.setToolTipText("Bring amplitude, phase, and Fourier windows to the front.");
+        openOutputsButton.setToolTipText("Show the hologram spectrum with the spatial filter (mask) that compensation uses, "
+                + "at the dimensions of the processed hologram.");
         saveButton.setToolTipText("Save Fourier transform, phase, amplitude, or the complex field (.npy).");
         btnApply.setToolTipText("Run the current submodule (compensate, shift, or propagate).");
 
-        openOutputsButton.addActionListener(e -> openAllOutputsInFiji());
+        openOutputsButton.addActionListener(e -> showSpatialFilterVisualization());
         saveButton.addActionListener(e -> onSave());
         btnApply.addActionListener(e -> {
             if (isAiaSelected()) {
@@ -644,7 +790,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     /**
-     * Load a float grayscale hologram from {@code imp} (duplicated; first slice if stack).
+     * Load a float grayscale hologram from {@code imp} (duplicated; first slice if stack) and link
+     * the plugin to that Fiji image: outputs are named after it (fix 1) and closing it releases
+     * everything derived from it (fix 8).
      */
     private void loadHologramFromImagePlus(ImagePlus imp, String hologramTitle) {
         if (imp == null) {
@@ -662,20 +810,105 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         state.setHologramImage(new ImagePlus(hologramTitle, gray.duplicate()));
         srcWidth = gray.getWidth();
         srcHeight = gray.getHeight();
+        padOffsetX = 0;
+        padOffsetY = 0;
+        holoBaseName = baseNameOf(imp.getTitle());
         state.setFourierImage(null);
         state.setAmplitudeImage(null);
         state.setPhaseImage(null);
         currentFieldRe = null;
         currentFieldIm = null;
         currentFieldW = 0;
-        speckleState.clear();
         currentFieldH = 0;
-        debugLog("Loaded image: title=\"" + imp.getTitle() + "\" size=" + srcWidth + "x" + srcHeight
-            + " stack=" + activeSourceImage.getStackSize());
-        debugLogOutputs("After image load");
-        IJ.showStatus("HoloBio: hologram linked.");
+        lastMask = null;
+        lastMaskGrid = null;
+        speckleState.clear();
+        linkTo(imp);
+        IJ.showStatus("HoloBio: hologram linked (" + holoBaseName + ").");
     }
 
+    /** Image title without its file extension ("holoStar.tif" -> "holoStar"). */
+    static String baseNameOf(String title) {
+        if (title == null || title.trim().isEmpty()) {
+            return "Hologram";
+        }
+        String t = title.trim();
+        int dot = t.lastIndexOf('.');
+        if (dot > 0 && t.length() - dot <= 6 && t.substring(dot + 1).matches("[A-Za-z0-9]+")) {
+            t = t.substring(0, dot);
+        }
+        return t;
+    }
+
+    /** Title of an output window: "<hologram> – Amplitude", "<hologram> – Phase", ... (fix 1). */
+    private String outputTitle(String role) {
+        return holoBaseName + " \u2013 " + role;
+    }
+
+    private void linkTo(ImagePlus imp) {
+        linkedImage = imp;
+        if (linkedImageListener == null) {
+            linkedImageListener = new ImageListener() {
+                @Override
+                public void imageOpened(ImagePlus i) {
+                }
+
+                @Override
+                public void imageUpdated(ImagePlus i) {
+                }
+
+                @Override
+                public void imageClosed(ImagePlus i) {
+                    if (i != null && i == linkedImage) {
+                        SwingUtilities.invokeLater(() -> onLinkedHologramClosed(i));
+                    }
+                }
+            };
+            ImagePlus.addImageListener(linkedImageListener);
+        }
+    }
+
+    private void onLinkedHologramClosed(ImagePlus closed) {
+        if (closed != linkedImage) {
+            return;
+        }
+        clearAllState();
+        IJ.showStatus("HoloBio: the linked hologram was closed; its data was released.");
+    }
+
+    /** Drop the hologram and everything computed from it. */
+    private void clearAllState() {
+        state.setHologramImage(null);
+        state.setFourierImage(null);
+        state.setAmplitudeImage(null);
+        state.setPhaseImage(null);
+        activeSourceImage = null;
+        linkedImage = null;
+        currentFieldRe = null;
+        currentFieldIm = null;
+        currentFieldW = 0;
+        currentFieldH = 0;
+        lastMask = null;
+        lastMaskGrid = null;
+        srcWidth = 0;
+        srcHeight = 0;
+        speckleState.clear();
+        holoBaseName = "Hologram";
+    }
+
+    /** Fix 8: processing needs a hologram that is still open in Fiji, not stale data from a closed one. */
+    private boolean requireOpenHologram() {
+        if (!state.hasHologram() || linkedImage == null) {
+            HoloBioFijiUi.message("HoloBio", "No hologram is linked. Open a hologram in Fiji and click Use Active Image.");
+            return false;
+        }
+        if (linkedImage.getWindow() == null && WindowManager.getImage(linkedImage.getID()) == null) {
+            clearAllState();
+            HoloBioFijiUi.message("HoloBio", "The linked hologram was closed. Open it again and click Use Active Image.");
+            return false;
+        }
+        return true;
+    }
     private void onApplyMvp() {
         debugLog("Apply clicked.");
         debugLogSelectionSnapshot("Apply snapshot");
@@ -691,9 +924,20 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             debugLog("Module: Phase Shifting.");
             run_phase_shifting_method();
         } else {
-            debugLog("Module: Phase Compensation (Apply propagation only).");
-            // In Phase Compensation module, global Apply means "apply propagation options"
-            // over the current compensated field (Python PP style), not "run compensation" again.
+            // Phase Compensation: Apply propagates the compensated field (Python PP style). If there is
+            // no field yet (nothing compensated, or a new hologram was just linked), compensate first
+            // instead of failing with "No reconstructed field" (fix 3). With no distance entered,
+            // Apply is just compensation; it no longer propagates a hidden default distance.
+            if (currentFieldRe == null || currentFieldIm == null) {
+                run_phase_compensation();
+                if (currentFieldRe == null) {
+                    return;
+                }
+            }
+            if (propOptionsPc != null && "Fixed".equals(propOptionsPc.mode())
+                    && Double.isNaN(propOptionsPc.effectiveZFixedUm())) {
+                return;
+            }
             _apply_propagation(propOptionsPc, "Angular Spectrum");
         }
     }
@@ -703,20 +947,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 "Clear the linked hologram and all reconstructed outputs?")) {
             return;
         }
-        debugLog("Reset clicked.");
-        state.setHologramImage(null);
-        state.setFourierImage(null);
-        state.setAmplitudeImage(null);
-        state.setPhaseImage(null);
-        activeSourceImage = null;
-        currentFieldRe = null;
-        currentFieldIm = null;
-        currentFieldW = 0;
-        speckleState.clear();
-        currentFieldH = 0;
-        debugLogOutputs("After reset");
+        clearAllState();
     }
-
     /** Python-like save menu for FT / phase / amplitude outputs. */
     private void onSave() {
         debugLog("Save clicked.");
@@ -754,33 +986,15 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
-    /**
-     * Save the current complex field as a complex64 .npy, cropped to the hologram's own
-     * footprint exactly like the Amplitude/Phase images — the working canvas is padded to a
-     * power of two, and the padding is not part of the reconstruction.
-     */
+    /** Save the current complex field as complex64 .npy, at the dimensions of the reconstruction. */
     private void saveComplexField() {
-        float[] re = currentFieldRe, im = currentFieldIm;
-        int w = currentFieldW, h = currentFieldH;
-        if (re == null || im == null || w <= 0 || h <= 0) {
-            HoloBioNpy.saveComplexDialog("complex_field", null);
+        if (currentFieldRe == null || currentFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
+            HoloBioNpy.saveComplexDialog(holoBaseName + "_complex_field", null);
             return;
         }
-        boolean padded = srcWidth > 0 && srcHeight > 0 && (w != srcWidth || h != srcHeight)
-                && padOffsetX >= 0 && padOffsetY >= 0
-                && padOffsetX + srcWidth <= w && padOffsetY + srcHeight <= h;
-        if (padded) {
-            float[] cr = new float[srcWidth * srcHeight];
-            float[] ci = new float[srcWidth * srcHeight];
-            for (int y = 0; y < srcHeight; y++) {
-                System.arraycopy(re, (y + padOffsetY) * w + padOffsetX, cr, y * srcWidth, srcWidth);
-                System.arraycopy(im, (y + padOffsetY) * w + padOffsetX, ci, y * srcWidth, srcWidth);
-            }
-            re = cr; im = ci; w = srcWidth; h = srcHeight;
-        }
-        HoloBioNpy.saveComplexDialog("complex_field", re, im, w, h);
+        HoloBioNpy.saveComplexDialog(holoBaseName + "_complex_field", currentFieldRe, currentFieldIm,
+            currentFieldW, currentFieldH);
     }
-
     private void openAllOutputsInFiji() {
         debugLog("Open All in Fiji clicked.");
         int opened = 0;
@@ -796,37 +1010,46 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
+    /**
+     * Show {@code image} as "<hologram> – role". An open window of the same size is updated in
+     * place; a new window is created only the first time or when the size changes.
+     */
     private boolean openOutputImageInFiji(ImagePlus image, String role) {
         if (image == null) {
             return false;
         }
-        String title = "HoloBio " + role;
+        String title = outputTitle(role);
         ImagePlus existing = WindowManager.getImage(title);
+        if (existing != null && existing.getWindow() != null && existing.getStackSize() == 1
+                && existing.getWidth() == image.getWidth() && existing.getHeight() == image.getHeight()) {
+            existing.setProcessor(image.getProcessor().duplicate());
+            existing.setOverlay(image.getOverlay() != null ? image.getOverlay().duplicate() : null);
+            existing.resetDisplayRange();
+            existing.updateAndDraw();
+            existing.changes = false;
+            return true;
+        }
         if (existing != null) {
             existing.changes = false;
             existing.close();
         }
         ImagePlus out = image.duplicate();
         out.deleteRoi();
+        if (image.getOverlay() != null) {
+            out.setOverlay(image.getOverlay().duplicate());
+        }
         out.setTitle(title);
         HoloBioFijiUi.showImagePlus(out);
         return true;
     }
-
     private void saveFtImage() {
         ImagePlus ft = state.getFourierImage();
-        if (ft == null && state.getHologramImage() != null) {
-            try {
-                ft = computeLogPowerSpectrum(state.getHologramImage());
-                state.setFourierImage(ft.duplicate());
-            } catch (RuntimeException ex) {
-                HoloBioFijiUi.message("HoloBio", "Could not build FT image for saving: " + ex.getMessage());
-                return;
-            }
+        if (ft == null && state.hasHologram() && previewMask()) {
+            ft = buildSpatialFilterImage();
+            state.setFourierImage(ft);
         }
-        saveStateImage(ft, "FT", "No Fourier image to save. Run Select +1 ROI or compensation first.");
+        saveStateImage(ft, holoBaseName + "_spatial_filter", "No spectrum to save. Use an active image first.");
     }
-
     private void saveStateImage(ImagePlus image, String defaultName, String emptyMessage) {
         if (image == null) {
             HoloBioFijiUi.message("HoloBio", emptyMessage);
@@ -1129,58 +1352,52 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     // ---------------- Shared execution entrypoints ----------------
+    /**
+     * Phase compensation on the linked hologram. ERS and Tu-DHM run on the hologram at its own
+     * size (no power-of-two zero padding, as HoloBio Python), so the reconstruction has the
+     * hologram's dimensions and no zero-filled border. Vortex-Legendre reconstructs the centred
+     * square it processes, so its outputs are min(W,H) × min(W,H) (fix 6).
+     */
     private void run_phase_compensation() {
-        debugLog("Compensate clicked.");
-        if (!state.hasHologram()) {
-            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
+        if (!requireOpenHologram()) {
             return;
         }
         if (!readParamsFromPhaseCompPanel()) {
             return;
         }
-
         FloatProcessor src = state.getHologramImage().getProcessor().convertToFloatProcessor();
-        FloatProcessor padded = padToCompensationCanvas(src);
-        int cw = padded.getWidth();
-        int ch = padded.getHeight();
-        int len = cw * ch;
-        float[] holoPx = (float[]) padded.getPixels();
-        double[] inp = meanRemovedDouble(holoPx, len);
-
-        HoloBioCompensationAlgorithms.RoiRect roiRect =
-            HoloBioCompensationAlgorithms.autoFirstOrderSpectrumRoi(inp, cw, ch);
-        Roi previewRoi = roiFromCompensationRect(roiRect);
-        debugLog("Compensation method selection: " +
-            (rbPcMethodTu != null && rbPcMethodTu.isSelected() ? "CFS" :
-            rbPcMethodVl != null && rbPcMethodVl.isSelected() ? "Vortex-Legendre" : "ERS")
-            + " | filter=Automatic (Rectangle) | canvas=" + cw + "x" + ch);
-        IJ.showStatus("HoloBio: Compensation filter -> Automatic (Rectangle)");
-
-        float[] previewSpectrum = holoPx.clone();
-        subtractMeanInPlace(previewSpectrum, len);
-        updateMaskedFourierPreview(previewSpectrum, cw, ch, previewRoi);
+        int w = src.getWidth();
+        int h = src.getHeight();
+        srcWidth = w;
+        srcHeight = h;
+        padOffsetX = 0;
+        padOffsetY = 0;
+        float[] px = (float[]) src.getPixels();
+        HoloBioCompensationAlgorithms.MaskSpec mask = readMaskSpec(w, h);
+        if (mask == null) {
+            return;
+        }
         double lam = params.getWavelengthUm();
         double dx = params.getPixelPitchXUm();
         double dy = params.getPixelPitchYUm();
+        boolean vl = rbPcMethodVl != null && rbPcMethodVl.isSelected();
+        boolean tu = rbPcMethodTu != null && rbPcMethodTu.isSelected();
 
-        int ersS = compSettings.getErsSearchSize();
-        double ersSt = compSettings.getErsStep();
         HoloBioCompensationAlgorithms.CompensationResult result;
         try {
-            if (rbPcMethodTu != null && rbPcMethodTu.isSelected()) {
-                result = HoloBioCompensationAlgorithms.cfs(inp, cw, ch, lam, dx, dy, roiRect,
-                    compSettings.getCfsStepWindow(), compSettings.getCfsGridSize());
-            } else if (rbPcMethodVl != null && rbPcMethodVl.isSelected()) {
-                int legendreLimit = compSettings.getVlLimit();
-                // Python vortexLegendre uses arr_hologram as-is (no mean subtraction; ERS/CFS subtract internally).
-                double[] holoContent = floatRegionToDouble(
-                        extractPaddedRegionFloat(holoPx, cw, ch, padOffsetX, padOffsetY, srcWidth, srcHeight));
-                debugLog(String.format("VL settings: limit=%d piston=%s pca=%s",
-                        legendreLimit, compSettings.isVlPiston(), compSettings.isVlPca()));
-                result = HoloBioCompensationAlgorithms.vortexLegendre(holoContent, srcWidth, srcHeight, lam, dx, dy,
-                    roiRect, legendreLimit, ersS, ersSt, compSettings.isVlPiston(), compSettings.isVlPca());
+            if (vl) {
+                // Python vortexLegendre uses arr_hologram as-is (no mean subtraction).
+                result = HoloBioCompensationAlgorithms.vortexLegendre(floatRegionToDouble(px), w, h, lam, dx, dy,
+                    compSettings.getVlLimit(), compSettings.isVlPiston(), compSettings.isVlPca(), mask);
             } else {
-                result = HoloBioCompensationAlgorithms.ers(inp, cw, ch, lam, dx, dy, roiRect, ersS, ersSt);
+                double[] inp = meanRemovedDouble(px, px.length);
+                HoloBioCompensationAlgorithms.RoiRect roiRect =
+                    HoloBioCompensationAlgorithms.autoFirstOrderSpectrumRoi(inp, w, h);
+                result = tu
+                    ? HoloBioCompensationAlgorithms.cfs(inp, w, h, lam, dx, dy, roiRect,
+                        compSettings.getCfsStepWindow(), compSettings.getCfsGridSize(), mask)
+                    : HoloBioCompensationAlgorithms.ers(inp, w, h, lam, dx, dy, roiRect,
+                        compSettings.getErsSearchSize(), compSettings.getErsStep(), mask);
             }
         } catch (RuntimeException ex) {
             HoloBioFijiUi.message("HoloBio", "Phase compensation failed: " + ex.getMessage());
@@ -1189,31 +1406,118 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
 
         HoloBioCompensationAlgorithms.ComplexField f = result.field;
-        int fw = f.width;
-        int fh = f.height;
-        int flen = fw * fh;
+        int flen = f.width * f.height;
         float[] re = new float[flen];
         float[] im = new float[flen];
         for (int i = 0; i < flen; i++) {
             re[i] = (float) f.re[i];
             im[i] = (float) f.im[i];
         }
-        setCurrentField(re, im, fw, fh);
-        // VL already letterboxes the square crop into the hologram frame. Pasting that
-        // onto the POT compensation canvas and cropToSource()'ing it again shifted the
-        // phase image relative to Python / QPI ROI coordinates.
-        if (fw == srcWidth && fh == srcHeight) {
-            FloatProcessor amp = amplitudeToDisplay(re, im, fw, fh);
-            FloatProcessor phs = phaseToDisplay(re, im, fw, fh);
-            state.setAmplitudeImage(new ImagePlus("Amplitude", amp));
-            state.setPhaseImage(new ImagePlus("Phase", phs));
-        } else {
-            renderCurrentFieldWithoutPropagation(cw, ch);
-        }
-        debugLog(String.format("Compensation done. fx=%.3f fy=%.3f", result.fx, result.fy));
-        debugLogOutputs("After compensation");
+        setCurrentField(re, im, f.width, f.height);
+        renderCurrentFieldWithoutPropagation();
+        lastMask = result.mask;
+        lastMaskGrid = vl ? squareCropLikeVortexLegendre(src) : src;
+        state.setFourierImage(buildSpatialFilterImage());
+        copyParamsToNumericalPanel();
         update_right_view();
-        IJ.showStatus("HoloBio: Phase compensation completed (fx=" + String.format("%.1f", result.fx) + ", fy=" + String.format("%.1f", result.fy) + ").");
+        IJ.showStatus(String.format("HoloBio: phase compensation completed (%dx%d, fx=%.1f, fy=%.1f).",
+            f.width, f.height, result.fx, result.fy));
+    }
+
+    /** The centred min(W,H) square that Vortex-Legendre processes (HoloBioVortexLegendre.cropToSquare). */
+    private static FloatProcessor squareCropLikeVortexLegendre(FloatProcessor src) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        if (w == h) {
+            return src;
+        }
+        int side = Math.min(w, h);
+        int x0 = w > h ? (w - h) / 2 : 0;
+        int y0 = h > w ? (h - w) / 2 : 0;
+        src.setRoi(x0, y0, side, side);
+        FloatProcessor out = (FloatProcessor) src.crop();
+        src.resetRoi();
+        return out;
+    }
+
+    /** Fix 2: the parameters that produced the current field are carried into Numerical Propagation. */
+    private void copyParamsToNumericalPanel() {
+        if (tfNpLambda == null) {
+            return;
+        }
+        tfNpLambda.setText(fmtParam(params.getWavelengthUm()));
+        tfNpPitchX.setText(fmtParam(params.getPixelPitchXUm()));
+        tfNpPitchY.setText(fmtParam(params.getPixelPitchYUm()));
+    }
+
+    private static String fmtParam(double v) {
+        return java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
+    }
+
+    /**
+     * Fix 5/10: log spectrum of the grid the compensation processes (the hologram, or for
+     * Vortex-Legendre its square crop), at that grid's own size, with the mask outlined.
+     */
+    private ImagePlus buildSpatialFilterImage() {
+        if (lastMask == null || lastMaskGrid == null) {
+            return null;
+        }
+        FloatProcessor g = (FloatProcessor) lastMaskGrid.duplicate();
+        float[] gp = (float[]) g.getPixels();
+        subtractMeanInPlace(gp, gp.length);
+        ByteProcessor bp = HoloBioFftDisplay.generateFftLogDisplayRect(g, g.getWidth(), g.getHeight());
+        ImagePlus imp = new ImagePlus("Spatial filter", bp);
+        double rx = lastMask.maskRx;
+        double ry = lastMask.maskRy;
+        Roi outline = lastMask.maskCircular
+            ? new OvalRoi(lastMask.fx - rx, lastMask.fy - ry, 2 * rx, 2 * ry)
+            : new Roi(lastMask.fx - rx, lastMask.fy - ry, 2 * rx, 2 * ry);
+        outline.setStrokeColor(Color.YELLOW);
+        outline.setStrokeWidth(2);
+        imp.setOverlay(new Overlay(outline));
+        return imp;
+    }
+
+    /** Mask for the current settings on the grid the selected method processes (no compensation). */
+    private boolean previewMask() {
+        if (!state.hasHologram()) {
+            return false;
+        }
+        FloatProcessor src = state.getHologramImage().getProcessor().convertToFloatProcessor();
+        HoloBioCompensationAlgorithms.MaskSpec spec = readMaskSpec(src.getWidth(), src.getHeight());
+        if (spec == null) {
+            return false;
+        }
+        boolean vl = rbPcMethodVl != null && rbPcMethodVl.isSelected();
+        FloatProcessor grid = vl ? squareCropLikeVortexLegendre(src) : src;
+        int gw = grid.getWidth();
+        int gh = grid.getHeight();
+        float[] gp = (float[]) grid.getPixels();
+        if (vl && !spec.manual && spec.circular) {
+            lastMask = HoloBioCompensationAlgorithms.spatialFilteringCf(floatRegionToDouble(gp), gw, gh);
+        } else {
+            double[] mr = meanRemovedDouble(gp, gp.length);
+            HoloBioCompensationAlgorithms.RoiRect roi = vl
+                ? new HoloBioCompensationAlgorithms.RoiRect(0, 0, gw, gh / 2)
+                : HoloBioCompensationAlgorithms.autoFirstOrderSpectrumRoi(mr, gw, gh);
+            lastMask = HoloBioCompensationAlgorithms.filterOrder(mr, gw, gh, roi, spec, true);
+        }
+        lastMaskGrid = grid;
+        return true;
+    }
+
+    /** "Spatial Filter Visualization" (fix 5): the mask the current settings use, at the processed size. */
+    private void showSpatialFilterVisualization() {
+        if (!state.hasHologram()) {
+            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
+            return;
+        }
+        if (!previewMask()) {
+            return;
+        }
+        ImagePlus img = buildSpatialFilterImage();
+        state.setFourierImage(img);
+        openOutputImageInFiji(img, "Spatial filter");
     }
 
     /** Remove global mean so FFT matches {@code pyDHM_methods.ERS} / {@link HoloBioCompensationAlgorithms} input. */
@@ -1229,17 +1533,6 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
-    /** Masked spectrum preview; {@code holoPixels} should already be mean-removed to match the compensation path. */
-    private void updateMaskedFourierPreview(float[] holoPixels, int cw, int ch, Roi roi) {
-        FloatProcessor fp = new FloatProcessor(cw, ch, holoPixels);
-        ImagePlus filteredFt = computeFijiFftDisplayFromFloat(fp, "Filtered FT (log)");
-        ImageProcessor ip = filteredFt.getProcessor();
-        applyMaskOutsideRoi(ip, roi);
-        filteredFt.setProcessor(ip.convertToByteProcessor());
-        filteredFt.setRoi((Roi) roi.clone());
-        state.setFourierImage(filteredFt);
-    }
-
     private static double[] meanRemovedDouble(float[] src, int len) {
         double mean = 0.0;
         for (int i = 0; i < len; i++) {
@@ -1251,24 +1544,6 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             out[i] = src[i] - mean;
         }
         return out;
-    }
-
-    /** Hologram pixels inside the pad (exclude zero border), matching Python {@code arr_hologram}. */
-    private static float[] extractPaddedRegionFloat(float[] pad, int cw, int ch,
-                                                   int offX, int offY, int w, int h) {
-        float[] out = new float[w * h];
-        for (int y = 0; y < h; y++) {
-            int srcOff = (offY + y) * cw + offX;
-            System.arraycopy(pad, srcOff, out, y * w, w);
-        }
-        return out;
-    }
-
-    /** Build an ImageJ ROI from algorithm rectangle (x2,y2 exclusive upper bounds). */
-    private static Roi roiFromCompensationRect(HoloBioCompensationAlgorithms.RoiRect r) {
-        int rw = r.x2 - r.x1;
-        int rh = r.y2 - r.y1;
-        return new Roi(r.x1, r.y1, rw, rh);
     }
 
     private void run_phase_shifting_method() {
@@ -1310,7 +1585,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void applyPhaseShiftResult(HoloBioPhaseShifting.Result ps, String method) {
-        setCurrentFieldFromImageSize(ps.re, ps.im, ps.width, ps.height);
+        setCurrentField(ps.re, ps.im, ps.width, ps.height);
+        srcWidth = ps.width;
+        srcHeight = ps.height;
+        copyParamsToNumericalPanel();
         if (cbPsAutoPropagate != null && cbPsAutoPropagate.isSelected()) {
             _propagate_current_field(propOptionsPs, "Angular Spectrum");
         } else {
@@ -1632,48 +1910,16 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void debugLogSelectionSnapshot(String prefix) {}
 
+    /** Amplitude and phase of the current field, at the field's own size (fix 6). */
     private void renderCurrentFieldWithoutPropagation() {
-        renderCurrentFieldWithoutPropagation(0, 0);
-    }
-
-    /**
-     * Renders amp/phase views. When {@code canvasW/H > 0}, embeds the field at the hologram pad offset
-     * before {@link #cropToSource} so display matches Python (compensated M×M, not misaligned pad coords).
-     */
-    private void renderCurrentFieldWithoutPropagation(int canvasW, int canvasH) {
         if (currentFieldRe == null || currentFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
             return;
         }
-        int w = currentFieldW;
-        int h = currentFieldH;
-        FloatProcessor amp = amplitudeToDisplay(currentFieldRe, currentFieldIm, w, h);
-        FloatProcessor phs = phaseToDisplay(currentFieldRe, currentFieldIm, w, h);
-        if (canvasW > 0 && canvasH > 0) {
-            amp = embedFieldOnCompensationCanvas(amp, w, h, canvasW, canvasH);
-            phs = embedFieldOnCompensationCanvas(phs, w, h, canvasW, canvasH);
-        }
-        state.setAmplitudeImage(new ImagePlus("Amplitude", cropToSource(amp)));
-        state.setPhaseImage(new ImagePlus("Phase", cropToSource(phs)));
+        state.setAmplitudeImage(new ImagePlus("Amplitude",
+            amplitudeToDisplay(currentFieldRe, currentFieldIm, currentFieldW, currentFieldH)));
+        state.setPhaseImage(new ImagePlus("Phase",
+            phaseToDisplay(currentFieldRe, currentFieldIm, currentFieldW, currentFieldH)));
     }
-
-    private FloatProcessor embedFieldOnCompensationCanvas(FloatProcessor field, int fieldW, int fieldH,
-                                                          int canvasW, int canvasH) {
-        FloatProcessor canvas = new FloatProcessor(canvasW, canvasH);
-        for (int y = 0; y < fieldH; y++) {
-            int cy = padOffsetY + y;
-            if (cy < 0 || cy >= canvasH) {
-                continue;
-            }
-            for (int x = 0; x < fieldW; x++) {
-                int cx = padOffsetX + x;
-                if (cx >= 0 && cx < canvasW) {
-                    canvas.setf(cx, cy, field.getf(x, y));
-                }
-            }
-        }
-        return canvas;
-    }
-
     private static double[] floatRegionToDouble(float[] region) {
         double[] out = new double[region.length];
         for (int i = 0; i < region.length; i++) {
@@ -1690,84 +1936,316 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             return;
         }
         FloatProcessor src = state.getHologramImage().getProcessor().convertToFloatProcessor();
-        FloatProcessor padded = padToCompensationCanvas(src);
-        int cw = padded.getWidth();
-        int ch = padded.getHeight();
-        float[] px = (float[]) padded.getPixels();
-        float[] re = new float[cw * ch];
-        float[] im = new float[cw * ch];
+        int w = src.getWidth();
+        int h = src.getHeight();
+        srcWidth = w;
+        srcHeight = h;
+        float[] px = (float[]) src.getPixels();
+        float[] re = new float[w * h];
+        float[] im = new float[w * h];
         if (phaseOnlyField) {
-            // Match HoloBio Python NP path: coherent grayscale -> phase map -> U = exp(i*phi), phi in [0, 2pi).
-            FloatProcessor src8 = (FloatProcessor) src.convertToByteProcessor().convertToFloatProcessor();
-            FloatProcessor padded8 = padToCompensationCanvas(src8);
-            float[] p8 = (float[]) padded8.getPixels();
+            // HoloBio Python NP: coherent grayscale -> phase map -> U = exp(i*phi), phi in [0, 2pi).
+            float[] p8 = (float[]) src.convertToByteProcessor().convertToFloatProcessor().getPixels();
             for (int i = 0; i < re.length; i++) {
                 double phi = (p8[i] / 255.0) * (2.0 * Math.PI);
                 re[i] = (float) Math.cos(phi);
                 im[i] = (float) Math.sin(phi);
             }
-            debugLog("Initialized NP field from coherent image as phase-only complex field.");
         } else {
-            for (int i = 0; i < re.length; i++) {
-                re[i] = px[i];
-                im[i] = 0f;
-            }
+            System.arraycopy(px, 0, re, 0, re.length);
         }
-        setCurrentField(re, im, cw, ch);
+        setCurrentField(re, im, w, h);
     }
-
     private void _propagate_current_field(PropagationUi propUi, String method) {
         if (currentFieldRe == null || currentFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
-            HoloBioFijiUi.message("HoloBio", "No reconstructed field is available.");
+            HoloBioFijiUi.message("HoloBio", "No reconstructed field is available yet. Run Compensate "
+                + "(or Phase Shifting) first; in Numerical Propagation, link a hologram with Use Active Image.");
             return;
         }
         if (propUi == null) {
             HoloBioFijiUi.message("HoloBio", "Propagation options are not initialized.");
             return;
         }
+        String mode = propUi.mode();
+        if ("Autofocus".equals(mode)) {
+            runAutofocusFromUi(propUi, method);
+            return;
+        }
+        if ("Z-scan".equals(mode)) {
+            runZScan(propUi, method);
+            return;
+        }
+        double zEff = propUi.effectiveZFixedUm();
+        if (Double.isNaN(zEff)) {
+            HoloBioFijiUi.message("HoloBio", "Enter a propagation distance (positive, negative or zero).");
+            return;
+        }
+        int w = currentFieldW;
+        int h = currentFieldH;
+        float[] re = currentFieldRe.clone();
+        float[] im = currentFieldIm.clone();
+        // z = 0 leaves the field exactly as it is; negative z propagates backwards (fix 9).
+        propagateSelectedAlgorithmInPlace(re, im, w, h, zEff, method);
+        state.setAmplitudeImage(new ImagePlus("Amplitude", amplitudeToDisplay(re, im, w, h)));
+        state.setPhaseImage(new ImagePlus("Phase", phaseToDisplay(re, im, w, h)));
+        IJ.showStatus("HoloBio: propagated to z = " + propUi.describeUm(zEff) + ".");
+    }
+
+    /** Fix 11: a stack of amplitude and phase planes from z start to z end. */
+    private void runZScan(PropagationUi ui, String method) {
+        double z0 = ui.effectiveZScanStartUm();
+        double z1 = ui.effectiveZScanEndUm();
+        double dz = ui.effectiveZScanStepUm();
+        if (Double.isNaN(z0) || Double.isNaN(z1) || Double.isNaN(dz)) {
+            HoloBioFijiUi.message("HoloBio", "Z-scan: enter z start, z end and step.");
+            return;
+        }
+        if (z1 <= z0 || dz <= 0 || dz > z1 - z0) {
+            HoloBioFijiUi.message("HoloBio", "Z-scan: z end must be greater than z start, and the step must be "
+                + "positive and no larger than the range.");
+            return;
+        }
+        int n = (int) Math.floor((z1 - z0) / dz + 1e-9) + 1;
+        if (n > 300) {
+            HoloBioFijiUi.message("HoloBio", "Z-scan: " + n + " planes requested; use a larger step (at most 300 planes).");
+            return;
+        }
+        int w = currentFieldW;
+        int h = currentFieldH;
+        ImageStack amp = new ImageStack(w, h);
+        ImageStack phs = new ImageStack(w, h);
+        lastZScanUm = new double[n];
+        for (int i = 0; i < n; i++) {
+            double z = z0 + i * dz;
+            lastZScanUm[i] = z;
+            IJ.showProgress(i, n);
+            float[] re = currentFieldRe.clone();
+            float[] im = currentFieldIm.clone();
+            propagateSelectedAlgorithmInPlace(re, im, w, h, z, method);
+            String label = "z = " + ui.describeUm(z);
+            amp.addSlice(label, amplitudeToDisplay(re, im, w, h));
+            phs.addSlice(label, phaseToDisplay(re, im, w, h));
+        }
+        IJ.showProgress(1.0);
+        showStack(amp, "Amplitude (Z-scan)");
+        showStack(phs, "Phase (Z-scan)");
+        SwingUtilities.invokeLater(() -> {
+            for (String role : new String[] {"Phase (Z-scan)", "Amplitude (Z-scan)"}) {
+                ImagePlus st = WindowManager.getImage(outputTitle(role));
+                if (st != null && st.getWindow() != null) {
+                    st.getWindow().toFront();
+                }
+            }
+        });
+        IJ.showStatus("HoloBio: Z-scan, " + n + " planes from " + ui.describeUm(z0) + " to " + ui.describeUm(z1) + ".");
+    }
+
+    private void showStack(ImageStack stack, String role) {
+        String title = outputTitle(role);
+        ImagePlus existing = WindowManager.getImage(title);
+        if (existing != null) {
+            existing.changes = false;
+            existing.close();
+        }
+        ImagePlus imp = new ImagePlus(title, stack);
+        HoloBioFijiUi.showImagePlus(imp);
+    }
+
+    /** Last focus-curve plot; for tests. */
+    private Plot lastAutofocusPlot;
+
+    /** Planes of the last Z-scan (µm, as propagated); for tests. */
+    private double[] lastZScanUm;
+    /** Distances, metric values and best distance of the last autofocus (µm, as propagated). */
+    private double[] lastAutofocusZ;
+    private double[] lastAutofocusScore;
+    private double lastAutofocusBest = Double.NaN;
+
+    /**
+     * Fix 4: autofocus over [z min, z max] with the user's step, evaluating the metric inside a
+     * rectangle drawn on the amplitude image. As in HoloBio Python ({@code autofocus_field}), the
+     * distance with the lowest metric value is kept, the field is propagated to it and shown, and
+     * the focus curve is plotted.
+     */
+    private void runAutofocusFromUi(PropagationUi ui, String method) {
+        double zMin = ui.autofocusZMinUm();
+        double zMax = ui.autofocusZMaxUm();
+        double step = ui.autofocusStepUm();
+        if (Double.isNaN(zMin) || Double.isNaN(zMax) || Double.isNaN(step)) {
+            HoloBioFijiUi.message("HoloBio", "Autofocus: enter z min, z max and step.");
+            return;
+        }
+        if (zMax <= zMin || step <= 0 || step > zMax - zMin) {
+            HoloBioFijiUi.message("HoloBio", "Autofocus: z max must be greater than z min, and the step must be "
+                + "positive and no larger than the range.");
+            return;
+        }
+        int n = (int) Math.floor((zMax - zMin) / step + 0.5) + 1;
+        if (n > 500) {
+            HoloBioFijiUi.message("HoloBio", "Autofocus: " + n + " planes requested; use a larger step (at most 500).");
+            return;
+        }
+        java.awt.Rectangle roi = autofocusRoi();
+        if (roi == null) {
+            renderCurrentFieldWithoutPropagation();
+            update_right_view();
+            ImagePlus a = WindowManager.getImage(outputTitle("Amplitude"));
+            if (a != null) {
+                WindowManager.setCurrentWindow(a.getWindow());
+            }
+            IJ.setTool("rectangle");
+            HoloBioFijiUi.message("HoloBio", "Autofocus needs a region of interest. Draw a rectangle on \""
+                + outputTitle("Amplitude") + "\" around the object to bring into focus, then press Apply again.");
+            return;
+        }
+        int w = currentFieldW;
+        int h = currentFieldH;
+        boolean tenengrad = "Tenengrad".equals(ui.autofocusMetric());
+        double[] zs = new double[n];
+        double[] scores = new double[n];
+        int best = 0;
+        for (int i = 0; i < n; i++) {
+            zs[i] = zMin + i * step;
+            IJ.showProgress(i, n);
+            float[] re = currentFieldRe.clone();
+            float[] im = currentFieldIm.clone();
+            propagateSelectedAlgorithmInPlace(re, im, w, h, zs[i], method);
+            double[] amp = roiAmplitude(re, im, w, roi);
+            scores[i] = tenengrad ? metricTenengradRoi(amp, roi.width, roi.height) : metricNormalizedVarianceRoi(amp);
+            if (scores[i] < scores[best]) {
+                best = i;
+            }
+        }
+        IJ.showProgress(1.0);
+        lastAutofocusZ = zs;
+        lastAutofocusScore = scores;
+        lastAutofocusBest = zs[best];
 
         float[] re = currentFieldRe.clone();
         float[] im = currentFieldIm.clone();
-        int w = currentFieldW;
-        int h = currentFieldH;
+        propagateSelectedAlgorithmInPlace(re, im, w, h, zs[best], method);
+        state.setAmplitudeImage(new ImagePlus("Amplitude", amplitudeToDisplay(re, im, w, h)));
+        state.setPhaseImage(new ImagePlus("Phase", phaseToDisplay(re, im, w, h)));
 
-        String mode = propUi.mode();
-        if ("Autofocus".equals(mode)) {
-            double zMin = propUi.autofocusZMinUm();
-            double zMax = propUi.autofocusZMaxUm();
-            if (zMin <= 0.0) {
-                HoloBioFijiUi.message("HoloBio", "Autofocus z min must be greater than zero.");
-                return;
-            }
-            if (zMax <= zMin) {
-                zMax = zMin + 1.0;
-            }
-            double bestZ = runAutofocus(re, im, w, h, zMin, zMax, method, propUi.autofocusMetric());
-            propagateSelectedAlgorithmInPlace(re, im, w, h, bestZ, method);
-            IJ.showStatus(String.format("HoloBio: Autofocus selected z=%.2f um", bestZ));
-        } else if ("Z-scan".equals(mode)) {
-            double zStart = propUi.effectiveZScanStartUm();
-            if (zStart <= 0.0) {
-                HoloBioFijiUi.message("HoloBio", "Z-scan start z must be greater than zero.");
-                return;
-            }
-            propagateSelectedAlgorithmInPlace(re, im, w, h, zStart, method);
-        } else {
-            double zEff = propUi.effectiveZFixedUm();
-            if (zEff <= 0.0) {
-                HoloBioFijiUi.message("HoloBio", "Fixed propagation z must be greater than zero.");
-                return;
-            }
-            propagateSelectedAlgorithmInPlace(re, im, w, h, zEff, method);
+        // Focus curve as HoloBio Python draws it (main_DHM_PP plot_in_main_thread): x = z / M^2 in µm,
+        // blue line "metric_nv"/"metric_tenv", red dashed line "Optimal Distance = … µm".
+        String metricName = tenengrad ? "metric_tenv" : "metric_nv";
+        double[] xs = new double[n];
+        double yMin = Double.POSITIVE_INFINITY;
+        double yMax = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) {
+            xs[i] = ui.toObjectUm(zs[i]);
+            yMin = Math.min(yMin, scores[i]);
+            yMax = Math.max(yMax, scores[i]);
         }
-
-        FloatProcessor amp = amplitudeToDisplay(re, im, w, h);
-        FloatProcessor phs = phaseToDisplay(re, im, w, h);
-        state.setAmplitudeImage(new ImagePlus("Amplitude", cropToSource(amp)));
-        state.setPhaseImage(new ImagePlus("Phase", cropToSource(phs)));
-        debugLogOutputs("After propagation (" + method + ", mode=" + mode + ")");
+        double pad = (yMax - yMin) * 0.05 + 1e-12;
+        double xBest = xs[best];
+        Plot plot = new Plot("Focus Curve \u2013 " + metricName, "Propagation Distance (\u00b5m)", "Sharpness Metric");
+        double xPad = (xs[n - 1] - xs[0]) * 0.05;     // matplotlib-like margin so an edge optimum stays visible
+        plot.setLimits(xs[0] - xPad, xs[n - 1] + xPad, yMin - pad, yMax + pad);
+        plot.setColor(Color.BLUE);
+        plot.setLineWidth(2);
+        plot.addPoints(xs, scores, Plot.LINE);
+        plot.setColor(Color.RED);
+        plot.setLineWidth(2);
+        plot.addPoints(new double[] {xBest, xBest}, new double[] {yMin - pad, yMax + pad}, Plot.LINE);
+        plot.setColor(Color.BLACK);
+        plot.setLineWidth(1);
+        plot.addLegend(metricName + "\n" + String.format(java.util.Locale.US, "Optimal Distance = %.2f \u00b5m", xBest));
+        plot.setFrameSize(640, 384);
+        if (!java.awt.GraphicsEnvironment.isHeadless() && !Boolean.getBoolean("holobio.noPlots")) {
+            // One focus-curve window: a new run replaces the previous curve instead of adding a window.
+            ImagePlus old = WindowManager.getImage(outputTitle("Focus Curve"));
+            if (old != null && old.getWindow() instanceof ij.gui.PlotWindow) {
+                ((ij.gui.PlotWindow) old.getWindow()).drawPlot(plot);
+                old.setTitle(outputTitle("Focus Curve"));
+            } else {
+                ImagePlus pimp = plot.show().getImagePlus();
+                pimp.setTitle(outputTitle("Focus Curve"));
+            }
+        }
+        lastAutofocusPlot = plot;
+        IJ.showStatus("HoloBio: autofocus best z = " + ui.describeUm(zs[best]) + " (" + n + " planes).");
     }
 
+    /** Rectangle drawn on the amplitude (or phase) output window, clipped to the field. */
+    private java.awt.Rectangle autofocusRoi() {
+        for (String role : new String[] {"Amplitude", "Phase"}) {
+            ImagePlus imp = WindowManager.getImage(outputTitle(role));
+            if (imp == null || imp.getRoi() == null || !imp.getRoi().isArea()) {
+                continue;
+            }
+            java.awt.Rectangle r = imp.getRoi().getBounds().intersection(new java.awt.Rectangle(0, 0, currentFieldW, currentFieldH));
+            if (r.width >= 3 && r.height >= 3) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    private static double[] roiAmplitude(float[] re, float[] im, int w, java.awt.Rectangle r) {
+        double[] out = new double[r.width * r.height];
+        for (int y = 0; y < r.height; y++) {
+            for (int x = 0; x < r.width; x++) {
+                int i = (r.y + y) * w + r.x + x;
+                out[y * r.width + x] = Math.hypot(re[i], im[i]);
+            }
+        }
+        return out;
+    }
+
+    /** {@code pyDHM_methods.metric_nv}: sum((A - mean)^2) / mean. */
+    static double metricNormalizedVarianceRoi(double[] a) {
+        double mean = 0;
+        for (double v : a) {
+            mean += v;
+        }
+        mean /= a.length;
+        if (mean == 0) {
+            return 0;
+        }
+        double acc = 0;
+        for (double v : a) {
+            acc += (v - mean) * (v - mean);
+        }
+        return acc / mean;
+    }
+
+    /**
+     * {@code pyDHM_methods.metric_tenv}: variance of Gx^2 + Gy^2 (Sobel), with SciPy's 'reflect'
+     * border (d c b a | a b c d) so values match HoloBio Python.
+     */
+    static double metricTenengradRoi(double[] a, int w, int h) {
+        double[] g = new double[w * h];
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                double p00 = at(a, w, h, x - 1, y - 1), p01 = at(a, w, h, x, y - 1), p02 = at(a, w, h, x + 1, y - 1);
+                double p10 = at(a, w, h, x - 1, y), p12 = at(a, w, h, x + 1, y);
+                double p20 = at(a, w, h, x - 1, y + 1), p21 = at(a, w, h, x, y + 1), p22 = at(a, w, h, x + 1, y + 1);
+                double gx = (p02 + 2 * p12 + p22) - (p00 + 2 * p10 + p20);
+                double gy = (p20 + 2 * p21 + p22) - (p00 + 2 * p01 + p02);
+                g[y * w + x] = gx * gx + gy * gy;
+            }
+        }
+        double mean = 0;
+        for (double v : g) {
+            mean += v;
+        }
+        mean /= g.length;
+        double acc = 0;
+        for (double v : g) {
+            acc += (v - mean) * (v - mean);
+        }
+        return acc / g.length;
+    }
+
+    private static double at(double[] a, int w, int h, int x, int y) {
+        if (x < 0) x = -x - 1;
+        if (x >= w) x = 2 * w - x - 1;
+        if (y < 0) y = -y - 1;
+        if (y >= h) y = 2 * h - y - 1;
+        return a[y * w + x];
+    }
     private boolean _update_physical_params() {
         if (isModuleNumericalProp()) {
             return readParamsFromNumericalPanel();
@@ -1852,103 +2330,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         change_menu_to("numerical_propagation");
     }
 
-    /**
-     * Fourier visualization: mean-removed padded hologram, then {@code log1p(|fftshift(fft2)|)} via {@link HoloBioFftDisplay}
-     * (same layout as compensation / Python PP).
-     */
-    private ImagePlus computeLogPowerSpectrum(ImagePlus source) {
-        ImageProcessor processor = source.getProcessor().convertToFloatProcessor();
-        FloatProcessor fp = (FloatProcessor) processor.duplicate();
-        FloatProcessor padded = padToCompensationCanvas(fp);
-        float[] p = (float[]) padded.getPixels();
-        subtractMeanInPlace(p, p.length);
-        return computeFijiFftDisplayFromFloat(padded, "Fourier Transform (log)");
-    }
-
-    /**
-     * Log spectrum image for ROI drawing; uses {@link HoloBioFftDisplay} so pixel indices match
-     * {@link HoloBioCompensationAlgorithms} (Fiji {@code FFT.forward} uses a square FHT canvas and would misalign rects).
-     */
-    private ImagePlus computeFijiFftDisplayFromFloat(FloatProcessor src, String outTitle) {
-        int w = src.getWidth();
-        int h = src.getHeight();
-        ByteProcessor bp = HoloBioFftDisplay.generateFftLogDisplayRect(src, w, h);
-        return new ImagePlus(outTitle, bp);
-    }
-
-    /**
-     * Pads the hologram to the next power-of-two width and height (independently), centered with zeros.
-     * Matches HoloBio Python PP using {@code np.fft.fft2} on the loaded array shape up to radix-2 padding per axis.
-     */
-    private FloatProcessor padToCompensationCanvas(FloatProcessor src) {
-        int w = src.getWidth();
-        int h = src.getHeight();
-        int cw = nextPowerOfTwo(w);
-        int ch = nextPowerOfTwo(h);
-        padOffsetX = (cw - w) / 2;
-        padOffsetY = (ch - h) / 2;
-        srcWidth = w;
-        srcHeight = h;
-
-        FloatProcessor dst = new FloatProcessor(cw, ch);
-        dst.insert(src, padOffsetX, padOffsetY);
-        return dst;
-    }
-
-    /** Legacy square pad (same max side); kept for callers that still require a square canvas. */
-    private FloatProcessor padToFhtSize(FloatProcessor src) {
-        int w = src.getWidth();
-        int h = src.getHeight();
-        int maxDim = Math.max(w, h);
-        int n = nextPowerOfTwo(maxDim);
-        padSize = n;
-        padOffsetX = (n - w) / 2;
-        padOffsetY = (n - h) / 2;
-        srcWidth = w;
-        srcHeight = h;
-
-        FloatProcessor dst = new FloatProcessor(n, n);
-        dst.insert(src, padOffsetX, padOffsetY);
-        return dst;
-    }
-
     private int nextPowerOfTwo(int value) {
         int n = 1;
         while (n < value) {
             n <<= 1;
         }
         return n;
-    }
-
-    private FloatProcessor cropToSource(FloatProcessor padded) {
-        if (srcWidth <= 0 || srcHeight <= 0) {
-            return padded;
-        }
-        int cw = padded.getWidth();
-        int ch = padded.getHeight();
-        FloatProcessor out = new FloatProcessor(srcWidth, srcHeight);
-        for (int y = 0; y < srcHeight; y++) {
-            for (int x = 0; x < srcWidth; x++) {
-                int px = x + padOffsetX;
-                int py = y + padOffsetY;
-                if (px >= 0 && py >= 0 && px < cw && py < ch) {
-                    out.setf(x, y, padded.getf(px, py));
-                }
-            }
-        }
-        return out;
-    }
-
-    private void applyMaskOutsideRoi(ImageProcessor ip, Roi roi) {
-        int w = ip.getWidth();
-        int h = ip.getHeight();
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                if (!roi.contains(x, y)) {
-                    ip.setf(x, y, 0f);
-                }
-            }
-        }
     }
 
     /** Frames from the chosen source. requiredFrames = 0 means all frames (at least 3). */
@@ -2058,35 +2445,6 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         speckleState.setOriginalField(currentFieldRe, currentFieldIm);
     }
 
-    private void setCurrentFieldFromImageSize(float[] re, float[] im, int w, int h) {
-        if (w == h && HoloBioRectFft.isPowerOfTwo(w) && re.length == w * h) {
-            setCurrentField(re, im, w, h);
-            srcWidth = w;
-            srcHeight = h;
-            padSize = w;
-            padOffsetX = 0;
-            padOffsetY = 0;
-            return;
-        }
-        int n = nextPowerOfTwo(Math.max(w, h));
-        padSize = n;
-        padOffsetX = (n - w) / 2;
-        padOffsetY = (n - h) / 2;
-        srcWidth = w;
-        srcHeight = h;
-        float[] outRe = new float[n * n];
-        float[] outIm = new float[n * n];
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                int srcIdx = y * w + x;
-                int dstIdx = (y + padOffsetY) * n + (x + padOffsetX);
-                outRe[dstIdx] = re[srcIdx];
-                outIm[dstIdx] = im[srcIdx];
-            }
-        }
-        setCurrentField(outRe, outIm, n, n);
-    }
-
     /** Amplitude display aligned with Python: (amp − min) / (max − min) → 0…255. */
     private FloatProcessor amplitudeToDisplay(float[] re, float[] im, int w, int h) {
         int len = w * h;
@@ -2136,84 +2494,6 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         return fp;
     }
 
-    private double runAutofocus(float[] baseRe, float[] baseIm, int w, int h, double zMinUm, double zMaxUm, String method, String metric) {
-        int steps = 20;
-        boolean tenengrad = metric != null && "Tenengrad".equals(metric);
-        double bestZ = zMinUm;
-        double bestScore = tenengrad ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
-        for (int i = 0; i <= steps; i++) {
-            double z = zMinUm + (zMaxUm - zMinUm) * i / (double) steps;
-            float[] re = baseRe.clone();
-            float[] im = baseIm.clone();
-            propagateSelectedAlgorithmInPlace(re, im, w, h, z, method);
-            double score = tenengrad ? metricTenengrad(re, im, w, h) : metricNormalizedVariance(re, im, w, h);
-            if (tenengrad) {
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestZ = z;
-                }
-            } else {
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestZ = z;
-                }
-            }
-        }
-        return bestZ;
-    }
-
-    private double metricNormalizedVariance(float[] re, float[] im, int w, int h) {
-        double mean = 0.0;
-        int len = w * h;
-        double[] amp = new double[len];
-        for (int i = 0; i < len; i++) {
-            amp[i] = Math.hypot(re[i], im[i]);
-            mean += amp[i];
-        }
-        mean /= len;
-        if (mean < 1e-12) return 0.0;
-        double acc = 0.0;
-        for (double v : amp) {
-            double d = v - mean;
-            acc += d * d;
-        }
-        return acc / mean;
-    }
-
-    /** Matches HoloBio Python {@code pyDHM_methods.metric_tenv}: variance of Sobel gradient energy G = Gx² + Gy². */
-    private double metricTenengrad(float[] re, float[] im, int w, int h) {
-        int len = w * h;
-        double[] amp = new double[len];
-        for (int i = 0; i < len; i++) {
-            amp[i] = Math.hypot(re[i], im[i]);
-        }
-        int inner = (w - 2) * (h - 2);
-        if (inner <= 0) {
-            return 0.0;
-        }
-        double[] gEnergy = new double[inner];
-        int k = 0;
-        for (int y = 1; y < h - 1; y++) {
-            for (int x = 1; x < w - 1; x++) {
-                int idx = y * w + x;
-                double gx = -amp[idx - w - 1] + amp[idx - w + 1] - 2 * amp[idx - 1] + 2 * amp[idx + 1] - amp[idx + w - 1] + amp[idx + w + 1];
-                double gy = -amp[idx - w - 1] - 2 * amp[idx - w] - amp[idx - w + 1] + amp[idx + w - 1] + 2 * amp[idx + w] + amp[idx + w + 1];
-                gEnergy[k++] = gx * gx + gy * gy;
-            }
-        }
-        double mean = 0.0;
-        for (double v : gEnergy) {
-            mean += v;
-        }
-        mean /= inner;
-        double acc = 0.0;
-        for (double v : gEnergy) {
-            double d = v - mean;
-            acc += d * d;
-        }
-        return acc / inner;
-    }
-
     private double parseDoubleOr(JTextField field, double fallback) {
         if (field == null) return fallback;
         try {
@@ -2224,21 +2504,16 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     private void propagateSelectedAlgorithmInPlace(float[] re, float[] im, int w, int h, double zUm, String method) {
-        if (w == h) {
-            if ("Fresnel".equals(method)) {
-                HoloBioPropagationMath.propagateFresnelInPlace(re, im, w, zUm, params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
-            } else {
-                HoloBioPropagationMath.propagateAngularSpectrumInPlace(re, im, w, zUm, params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
-            }
+        // Rectangular propagators accept any size, so non-square / non-power-of-two fields
+        // (e.g. 1280x960, or the 960x960 Vortex-Legendre crop) no longer throw (fix 9).
+        if ("Fresnel".equals(method)) {
+            HoloBioPropagationMath.propagateFresnelInPlaceRect(re, im, h, w, zUm,
+                params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
         } else {
-            if ("Fresnel".equals(method)) {
-                HoloBioPropagationMath.propagateFresnelInPlaceRect(re, im, h, w, zUm, params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
-            } else {
-                HoloBioPropagationMath.propagateAngularSpectrumInPlaceRect(re, im, h, w, zUm, params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
-            }
+            HoloBioPropagationMath.propagateAngularSpectrumInPlaceRect(re, im, h, w, zUm,
+                params.getWavelengthUm(), params.getPixelPitchXUm(), params.getPixelPitchYUm());
         }
     }
-
     /**
      * Per-module propagation controls (matches HoloBio Python: fixed uses M and distance in µm with M² axial scaling).
      */
@@ -2258,7 +2533,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         private final JTextField zScanStepField;
         private final JTextField afZMinField;
         private final JTextField afZMaxField;
-        private final JLabel lblFixedDist, lblZStart, lblZEnd, lblZStep, lblAfMin, lblAfMax;
+        private final JTextField afStepField;
+        private final JLabel lblFixedDist, lblZStart, lblZEnd, lblZStep, lblAfMin, lblAfMax, lblAfStep;
         private final JComboBox<String> autofocusMetricBox;
         private final JPanel cardPanel;
         private final CardLayout cardLayout;
@@ -2290,9 +2566,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
             lateralMagField = new JTextField(HoloBioUiStyle.formatMag(40.0), FIELD_COLS);
             if (!scaleAxialWithMagnification) {
-                lateralMagField.setEnabled(false);
-                lateralMagField.setToolTipText(
-                    "Not used for axial z in Numerical Propagation (Python NP applies distance in µm directly).");
+                // Numerical Propagation uses the distances exactly as typed (no M^2, as HoloBio Python);
+                // M still sets the µm-per-pixel scale of the QPI and Speckle tools.
+                lateralMagField.setToolTipText("Lateral magnification M, used for the µm scale of the QPI / Speckle "
+                    + "tools. Numerical Propagation distances are used as entered (not multiplied by M\u00b2).");
             }
             HoloBioUiStyle.addLabelField(root, pc, HoloBioUiStyle.MAG_LABEL, lateralMagField);
 
@@ -2321,10 +2598,20 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             GridBagConstraints ac = HoloBioUiStyle.formGbc();
             afZMinField = new JTextField("", FIELD_COLS);
             afZMaxField = new JTextField("", FIELD_COLS);
+            afStepField = new JTextField("", FIELD_COLS);
             autofocusMetricBox = new JComboBox<>(new String[] {"Normalized Variance", "Tenengrad"});
             autofocusMetricBox.setLightWeightPopupEnabled(false);
             lblAfMin = HoloBioUiStyle.addLabelField(afCard, ac, "z min (µm)", afZMinField);
             lblAfMax = HoloBioUiStyle.addLabelField(afCard, ac, "z max (µm)", afZMaxField);
+            lblAfStep = HoloBioUiStyle.addLabelField(afCard, ac, "Step (µm)", afStepField,
+                "Distance between the planes tested. Smaller = more precise and slower.");
+            afZMinField.setToolTipText("Negative values propagate backwards.");
+            JLabel afRoiNote = HoloBioUiStyle.helperText("Draw a rectangle ROI on the amplitude image first.");
+            ac.gridx = 0;
+            ac.gridwidth = 2;
+            afCard.add(afRoiNote, ac);
+            ac.gridy++;
+            ac.gridwidth = 1;
             HoloBioUiStyle.addLabelField(afCard, ac, "Autofocus metric", autofocusMetricBox,
                 HoloBioUiStyle.FORM_LABEL_W, 140);
             cardPanel.add(afCard, "AF");
@@ -2354,6 +2641,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             double stepUm = parseDistUm(zScanStepField, 100.0);
             double af0Um = parseDistUm(afZMinField, 1000.0);
             double af1Um = parseDistUm(afZMaxField, 9000.0);
+            double afStUm = parseDistUm(afStepField, 100.0);
             distanceUnit = next;
             updatingDistanceUi = true;
             try {
@@ -2364,6 +2652,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 zScanStepField.setText(fmtDist(stepUm));
                 afZMinField.setText(fmtDist(af0Um));
                 afZMaxField.setText(fmtDist(af1Um));
+                afStepField.setText(fmtDist(afStUm));
             } finally {
                 updatingDistanceUi = false;
             }
@@ -2377,6 +2666,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             lblZStep.setText("Step (" + u + "):");
             lblAfMin.setText("z min (" + u + "):");
             lblAfMax.setText("z max (" + u + "):");
+            lblAfStep.setText("Step (" + u + "):");
         }
 
         private double umPerUnit() {
@@ -2430,31 +2720,73 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             return M * M;
         }
 
-        /**
-         * Effective propagation distance (µm) for fixed mode. Phase modules: {@code distance × M²} like Python
-         * compensated-field propagation. Numerical propagation: fixed-z from this panel (no M²).
-         */
-        private double effectiveZFixedUm() {
-            if (!scaleAxialWithMagnification) {
-                return parseDistUm(fixedDistanceField, 0.0);
+        /** Value in µm, or NaN when the field is empty / not a number (no silent defaults). */
+        private double requiredUm(JTextField tf) {
+            String t = tf.getText().trim();
+            if (t.isEmpty()) {
+                return Double.NaN;
             }
-            return parseDistUm(fixedDistanceField, 5000.0) * scaleImg();
+            try {
+                return Double.parseDouble(t) * umPerUnit();
+            } catch (NumberFormatException ex) {
+                return Double.NaN;
+            }
         }
 
-        /** First plane for Z-scan (µm). */
+        /** Phase modules scale entered (object-side) distances by M^2, like HoloBio Python. */
+        private double toPropagatedUm(double enteredUm) {
+            return scaleAxialWithMagnification ? enteredUm * scaleImg() : enteredUm;
+        }
+
+        /**
+         * Fixed-mode distance in µm as propagated (phase modules: distance x M^2, as Python;
+         * Numerical Propagation: as entered). Any sign; NaN when empty (fix 9).
+         */
+        private double effectiveZFixedUm() {
+            return toPropagatedUm(requiredUm(fixedDistanceField));
+        }
+
         private double effectiveZScanStartUm() {
-            double z0 = parseDistUm(zScanZMinField, 1000.0);
-            return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
+            return toPropagatedUm(requiredUm(zScanZMinField));
+        }
+
+        private double effectiveZScanEndUm() {
+            return toPropagatedUm(requiredUm(zScanZMaxField));
+        }
+
+        private double effectiveZScanStepUm() {
+            return toPropagatedUm(requiredUm(zScanStepField));
         }
 
         private double autofocusZMinUm() {
-            double z0 = parseDistUm(afZMinField, 1000.0);
-            return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
+            return toPropagatedUm(requiredUm(afZMinField));
         }
 
         private double autofocusZMaxUm() {
-            double z0 = parseDistUm(afZMaxField, 9000.0);
-            return scaleAxialWithMagnification ? z0 * scaleImg() : z0;
+            return toPropagatedUm(requiredUm(afZMaxField));
+        }
+
+        private double autofocusStepUm() {
+            return toPropagatedUm(requiredUm(afStepField));
+        }
+
+        /** A propagated distance back in the units the user entered (undoing M^2). */
+        private double toDisplayUnits(double propagatedUm) {
+            double entered = scaleAxialWithMagnification ? propagatedUm / scaleImg() : propagatedUm;
+            return entered / umPerUnit();
+        }
+
+        private String unitLabel() {
+            return distanceUnit;
+        }
+
+        /** Propagated distance in object-plane µm (z / M^2 in the phase modules), as Python plots it. */
+        private double toObjectUm(double propagatedUm) {
+            return scaleAxialWithMagnification ? propagatedUm / scaleImg() : propagatedUm;
+        }
+
+        private String describeUm(double propagatedUm) {
+            return String.format(java.util.Locale.US, "%.4g %s", toDisplayUnits(propagatedUm), distanceUnit);
         }
 
         private String autofocusMetric() {

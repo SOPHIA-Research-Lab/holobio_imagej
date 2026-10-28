@@ -34,9 +34,8 @@ public final class HoloBioFftDisplay {
         if (realField.getWidth() != width || realField.getHeight() != height) {
             throw new IllegalArgumentException("Processor size must match width x height.");
         }
-        if (!HoloBioRectFft.isPowerOfTwo(width) || !HoloBioRectFft.isPowerOfTwo(height)) {
-            throw new IllegalArgumentException("FFT display requires power-of-two width and height.");
-        }
+        // HoloBioRectFft handles any size (radix-2 or Bluestein), so the spectrum is shown at the
+        // hologram's own dimensions rather than a padded power-of-two canvas.
         int len = width * height;
         float[] re = new float[len];
         float[] im = new float[len];

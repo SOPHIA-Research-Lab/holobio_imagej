@@ -73,6 +73,7 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
     // =========================================================================
     @Override
     public void run(String arg) {
+        HoloBioClassPreload.preloadAll();
         SwingUtilities.invokeLater(this::createAndShowGUI);
     }
 

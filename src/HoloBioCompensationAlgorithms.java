@@ -46,27 +46,134 @@ public final class HoloBioCompensationAlgorithms {
         public final ComplexField field;
         public final double fx;
         public final double fy;
+        /** The spatial filter actually applied (for the filter visualization); may be null. */
+        public final FilteredOrder mask;
 
         public CompensationResult(ComplexField field, double fx, double fy) {
+            this(field, fx, fy, null);
+        }
+
+        public CompensationResult(ComplexField field, double fx, double fy, FilteredOrder mask) {
             this.field = field;
             this.fx = fx;
             this.fy = fy;
+            this.mask = mask;
         }
     }
 
-    static final class FilteredOrder {
+    /**
+     * Spatial filter chosen by the user: circular or rectangular, either automatic (centred on
+     * the +1 peak, half-size = distance to DC / 3, as {@code pyDHM_methods.spatialFilteringCF})
+     * or manual. A manual window is stored as fractions of the spectrum size (centre offset from
+     * DC and half-sizes) so the same window maps onto any processing grid: the native hologram
+     * for ERS / Tu-DHM and the square crop for Vortex-Legendre.
+     */
+    public static final class MaskSpec {
+        public final boolean circular;
+        public final boolean manual;
+        public final double cxFrac, cyFrac, rxFrac, ryFrac;
+
+        public static final MaskSpec AUTO_CIRCLE = new MaskSpec(true, false, 0, 0, 0, 0);
+
+        public MaskSpec(boolean circular, boolean manual, double cxFrac, double cyFrac, double rxFrac, double ryFrac) {
+            this.circular = circular;
+            this.manual = manual;
+            this.cxFrac = cxFrac;
+            this.cyFrac = cyFrac;
+            this.rxFrac = rxFrac;
+            this.ryFrac = ryFrac;
+        }
+
+        public static MaskSpec auto(boolean circular) {
+            return new MaskSpec(circular, false, 0, 0, 0, 0);
+        }
+
+        /**
+         * Manual window in pixels of a {@code w×h} centred (fftshifted) spectrum: centre (cx, cy)
+         * and half-sizes (rx, ry); a circle uses rx = ry = radius.
+         */
+        public static MaskSpec manualPx(boolean circular, double cx, double cy, double rx, double ry, int w, int h) {
+            return new MaskSpec(circular, true, (cx - w / 2.0) / w, (cy - h / 2.0) / h, rx / w, ry / h);
+        }
+    }
+
+    public static final class FilteredOrder {
         public final ComplexField field;
         public final double fx;
         public final double fy;
         /** Peak magnitude over the median of the searched region; see {@link #MIN_CARRIER_PROMINENCE}. */
         public final double prominence;
+        /** Mask geometry on the processing grid (centred spectrum pixels): centre fx, fy and half-sizes. */
+        public final double maskRx, maskRy;
+        public final boolean maskCircular;
+        public final int gridW, gridH;
 
         private FilteredOrder(ComplexField field, double fx, double fy, double prominence) {
+            this(field, fx, fy, prominence, Double.NaN, Double.NaN, true, field != null ? field.width : 0,
+                field != null ? field.height : 0);
+        }
+
+        FilteredOrder(ComplexField field, double fx, double fy, double prominence,
+                      double maskRx, double maskRy, boolean maskCircular, int gridW, int gridH) {
             this.field = field;
             this.fx = fx;
             this.fy = fy;
             this.prominence = prominence;
+            this.maskRx = maskRx;
+            this.maskRy = maskRy;
+            this.maskCircular = maskCircular;
+            this.gridW = gridW;
+            this.gridH = gridH;
         }
+    }
+
+    /**
+     * Isolate the +1 order with the user's mask. Automatic: peak searched inside {@code searchRoi}
+     * (DC block cleared), half-size = distance to DC / 3. Manual: the window given in {@code spec},
+     * whose centre is also the carrier seed (as Python's manual filters). Circular masks are
+     * ellipses inscribed in the window, so a circle stays a circle on non-square grids.
+     */
+    static FilteredOrder filterOrder(double[] inp, int width, int height, RoiRect searchRoi, MaskSpec spec,
+                                     boolean suppressDc) {
+        ComplexField spectrum = fft2(inp, width, height);
+        HoloBioRectFft.fftShift2d(spectrum.re, spectrum.im, height, width);
+        if (suppressDc) {
+            zeroDcNeighborhoodInShiftedSpectrum(spectrum, width, height, 20);
+        }
+        double fx, fy, prominence, rx, ry;
+        if (spec != null && spec.manual) {
+            fx = width / 2.0 + spec.cxFrac * width;
+            fy = height / 2.0 + spec.cyFrac * height;
+            rx = Math.max(1.0, spec.rxFrac * width);
+            ry = Math.max(1.0, spec.ryFrac * height);
+            prominence = Double.NaN;
+        } else {
+            double[] peak = orderPeakFrequencyFromShiftedSpectrum(spectrum, width, height, searchRoi);
+            fx = peak[0];
+            fy = peak[1];
+            prominence = peak[2];
+            double r = Math.max(1.0, Math.hypot(fy - height / 2.0, fx - width / 2.0) / 3.0);
+            rx = r;
+            ry = r;
+        }
+        boolean circ = spec == null || spec.circular;
+        ComplexField filtered = new ComplexField(width, height);
+        for (int y = 0; y < height; y++) {
+            double dy = y - fy;
+            for (int x = 0; x < width; x++) {
+                double dx = x - fx;
+                boolean keep = circ
+                    ? (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
+                    : Math.abs(dx) <= rx && Math.abs(dy) <= ry;
+                if (keep) {
+                    int i = y * width + x;
+                    filtered.re[i] = spectrum.re[i];
+                    filtered.im[i] = spectrum.im[i];
+                }
+            }
+        }
+        HoloBioRectFft.ifftShift2d(filtered.re, filtered.im, height, width);
+        return new FilteredOrder(ifft2(filtered), fx, fy, prominence, rx, ry, circ, width, height);
     }
 
     /**
@@ -169,17 +276,32 @@ public final class HoloBioCompensationAlgorithms {
     public static CompensationResult ers(double[] inp, int width, int height,
                                          double wavelengthUm, double dxUm, double dyUm,
                                          RoiRect roi, int s, double step) {
+        return ers(inp, width, height, wavelengthUm, dxUm, dyUm, roi, s, step, null);
+    }
+
+    /** ERS with the user's spatial filter ({@code null} = automatic circle, the Python default). */
+    public static CompensationResult ers(double[] inp, int width, int height,
+                                         double wavelengthUm, double dxUm, double dyUm,
+                                         RoiRect roi, int s, double step, MaskSpec mask) {
         double[] pre = meanRemovedCopy(inp);
-        FilteredOrder fo = filterAndExtractOrderCircular(pre, width, height, roi, true);
-        return searchReferenceByBinaryMetric(fo.field, wavelengthUm, dxUm, dyUm, fo.fx, fo.fy, s, step);
+        FilteredOrder fo = filterOrder(pre, width, height, roi, mask, true);
+        CompensationResult r = searchReferenceByBinaryMetric(fo.field, wavelengthUm, dxUm, dyUm, fo.fx, fo.fy, s, step);
+        return new CompensationResult(r.field, r.fx, r.fy, fo);
     }
 
 //CFS
     public static CompensationResult cfs(double[] inp, int width, int height,
                                          double wavelengthUm, double dxUm, double dyUm,
                                          RoiRect roi, double stepWindow, int gridSize) {
+        return cfs(inp, width, height, wavelengthUm, dxUm, dyUm, roi, stepWindow, gridSize, null);
+    }
+
+    /** Tu-DHM / CFS with the user's spatial filter ({@code null} = automatic circle). */
+    public static CompensationResult cfs(double[] inp, int width, int height,
+                                         double wavelengthUm, double dxUm, double dyUm,
+                                         RoiRect roi, double stepWindow, int gridSize, MaskSpec mask) {
         double[] pre = meanRemovedCopy(inp);
-        FilteredOrder fo = filterAndExtractOrderCircular(pre, width, height, roi, true);
+        FilteredOrder fo = filterOrder(pre, width, height, roi, mask, true);
         ComplexField holoFilter = fo.field;
         double bestFy = fo.fy;
         double bestFx = fo.fx;
@@ -213,7 +335,7 @@ public final class HoloBioCompensationAlgorithms {
         bestFy = refined[1];
 
         ComplexField out = applyReferenceWave(holoFilter, wavelengthUm, dxUm, dyUm, bestFx, bestFy);
-        return new CompensationResult(out, bestFx, bestFy);
+        return new CompensationResult(out, bestFx, bestFy, fo);
     }
 
     public static CompensationResult cnt(double[] inp, int width, int height,
@@ -310,6 +432,17 @@ public final class HoloBioCompensationAlgorithms {
                                                     RoiRect roi, int legendreLimit, int ersSearchSize, double ersStep,
                                                     boolean piston, boolean usePca) {
         return HoloBioVortexLegendre.run(inp, width, height, wavelengthUm, dxUm, dyUm, legendreLimit, piston, usePca);
+    }
+
+    /**
+     * Vortex-Legendre with the user's spatial filter. Returns the field of the processed square
+     * crop (min(W,H) × min(W,H)), the region the method actually reconstructs.
+     */
+    public static CompensationResult vortexLegendre(double[] inp, int width, int height,
+                                                    double wavelengthUm, double dxUm, double dyUm,
+                                                    int legendreLimit, boolean piston, boolean usePca, MaskSpec mask) {
+        return HoloBioVortexLegendre.run(inp, width, height, wavelengthUm, dxUm, dyUm, legendreLimit, piston, usePca,
+            mask, false);
     }
 
     private static double mean(double[] a) {
@@ -501,7 +634,7 @@ public final class HoloBioCompensationAlgorithms {
             }
         }
         HoloBioRectFft.ifftShift2d(filtered.re, filtered.im, height, width);
-        return new FilteredOrder(ifft2(filtered), fx, fy, prominence);
+        return new FilteredOrder(ifft2(filtered), fx, fy, prominence, radius, radius, true, width, height);
     }
 
     private static void zeroDcNeighborhoodInShiftedSpectrum(ComplexField spectrum, int width, int height, int halfWindow) {

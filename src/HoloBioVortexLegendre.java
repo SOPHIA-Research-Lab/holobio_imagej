@@ -14,6 +14,19 @@ final class HoloBioVortexLegendre {
             double[] inp, int width, int height,
             double wavelengthUm, double dxUm, double dyUm,
             int limit, boolean piston, boolean usePca) {
+        return run(inp, width, height, wavelengthUm, dxUm, dyUm, limit, piston, usePca, null, true);
+    }
+
+    /**
+     * @param mask           user spatial filter, or null for Python's automatic circle
+     * @param embedInFull    true: paste the square result back into the W×H frame (legacy);
+     *                       false: return the square crop that was actually processed
+     */
+    static HoloBioCompensationAlgorithms.CompensationResult run(
+            double[] inp, int width, int height,
+            double wavelengthUm, double dxUm, double dyUm,
+            int limit, boolean piston, boolean usePca,
+            HoloBioCompensationAlgorithms.MaskSpec mask, boolean embedInFull) {
         limit = Math.max(1, limit);
 
         // Python: M×M square crop; FFT at native size (pad to next POT when needed, never center-crop down).
@@ -32,8 +45,11 @@ final class HoloBioVortexLegendre {
         double dy = dyUm * 1e-6;
         double k = 2.0 * Math.PI / wavelength;
 
-        HoloBioCompensationAlgorithms.FilteredOrder fo =
-                HoloBioCompensationAlgorithms.spatialFilteringCf(holo, cols, rows);
+        // Automatic circle = Python spatialFilteringCF; any other choice goes through the shared mask.
+        HoloBioCompensationAlgorithms.FilteredOrder fo = (mask == null || (!mask.manual && mask.circular))
+                ? HoloBioCompensationAlgorithms.spatialFilteringCf(holo, cols, rows)
+                : HoloBioCompensationAlgorithms.filterOrder(holo, cols, rows,
+                        new HoloBioCompensationAlgorithms.RoiRect(0, 0, cols, rows / 2), mask, true);
         double fxSeed = fo.fx;
         double fySeed = fo.fy;
 
@@ -61,12 +77,15 @@ final class HoloBioVortexLegendre {
         // Place the square back into the full hologram frame (centred), matching RT letterbox.
         // Empty margins use unit amplitude / zero phase → mid-grey on the cyclic phase map
         // (not black zeros from a top-left paste into the pad canvas).
+        if (!embedInFull) {
+            return new HoloBioCompensationAlgorithms.CompensationResult(squareOut, fxMax, fyMax, fo);
+        }
         HoloBioCompensationAlgorithms.ComplexField full =
                 embedSquareInFull(squareOut, width, height, sc.x0, sc.y0);
 
         double fxOut = fxMax + coordOff + sc.x0;
         double fyOut = fyMax + coordOff + sc.y0;
-        return new HoloBioCompensationAlgorithms.CompensationResult(full, fxOut, fyOut);
+        return new HoloBioCompensationAlgorithms.CompensationResult(full, fxOut, fyOut, fo);
     }
 
     /**

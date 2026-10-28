@@ -65,7 +65,18 @@ public final class HoloBioFijiUi {
         error("HoloBio", msg);
     }
 
+    /**
+     * Test hook: when set, informational/error messages are passed here instead of opening a
+     * modal dialog, so automated tests can drive the plugins headlessly. Null in normal use.
+     */
+    public static volatile Consumer<String> dialogInterceptor;
+
     private static void showSwingDialog(String title, String msg, int type) {
+        Consumer<String> hook = dialogInterceptor;
+        if (hook != null) {
+            hook.accept(msg);
+            return;
+        }
         String safeTitle = (title == null || title.isEmpty()) ? "HoloBio" : title;
         if (java.awt.GraphicsEnvironment.isHeadless()) {
             IJ.log(safeTitle + ": " + msg);
