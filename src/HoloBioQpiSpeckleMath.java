@@ -187,6 +187,12 @@ public final class HoloBioQpiSpeckleMath {
      * Returns one snapshot per iteration plus the initial copy (length {@code maxIterations + 1}).
      */
     public static List<float[]> hybridMedianMeanIterations(float[] sample, int w, int h, int maxIterations) {
+        return hybridMedianMeanIterations(sample, w, h, maxIterations, null);
+    }
+
+    /** As above; {@code onIteration} (may be null) receives 1…maxIterations as each one finishes. */
+    public static List<float[]> hybridMedianMeanIterations(float[] sample, int w, int h, int maxIterations,
+                                                           java.util.function.IntConsumer onIteration) {
         int n = w * h;
         double[] meanImage = new double[n];
         for (int i = 0; i < n; i++) {
@@ -205,6 +211,9 @@ public final class HoloBioQpiSpeckleMath {
                 snap[i] = (float) meanImage[i];
             }
             out.add(clip0255(snap));
+            if (onIteration != null) {
+                onIteration.accept(it + 1);
+            }
         }
         return out;
     }
@@ -223,6 +232,12 @@ public final class HoloBioQpiSpeckleMath {
      * SPP on complex field (Python {@code spp_filter}). Returns one complex snapshot per iteration.
      */
     public static SppIterations sppFilter(float[] fieldRe, float[] fieldIm, int w, int h, int maxIterations) {
+        return sppFilter(fieldRe, fieldIm, w, h, maxIterations, null);
+    }
+
+    /** As above; {@code onIteration} (may be null) receives 1…maxIterations as each one finishes. */
+    public static SppIterations sppFilter(float[] fieldRe, float[] fieldIm, int w, int h, int maxIterations,
+                                         java.util.function.IntConsumer onIteration) {
         int n = w * h;
         double[] realPart = new double[n];
         double[] imagPart = new double[n];
@@ -262,6 +277,9 @@ public final class HoloBioQpiSpeckleMath {
             }
             reList.add(reSnap);
             imList.add(imSnap);
+            if (onIteration != null) {
+                onIteration.accept(it + 1);
+            }
         }
         return new SppIterations(reList, imList);
     }

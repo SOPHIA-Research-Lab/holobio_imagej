@@ -149,4 +149,29 @@ public final class HoloBioSpeckleState {
     public boolean hasFiltered(boolean amplitudeChannel) {
         return getFiltered(amplitudeChannel) != null;
     }
+
+    private String filterDescAmplitude;
+    private String filterDescPhase;
+
+    /** How the channel was filtered, e.g. "HMF, 3 iterations"; null after a reset. */
+    public void setFilterDescription(boolean amplitudeChannel, String desc) {
+        if (amplitudeChannel) {
+            filterDescAmplitude = desc;
+        } else {
+            filterDescPhase = desc;
+        }
+    }
+
+    public String getFilterDescription(boolean amplitudeChannel) {
+        return amplitudeChannel ? filterDescAmplitude : filterDescPhase;
+    }
+
+    /** Back to the unfiltered image (Iterations = 0): no filtered image, no iterations. */
+    public void clearFiltered() {
+        filteredAmplitude0255 = null;
+        filteredPhase0255 = null;
+        filterDescAmplitude = null;
+        filterDescPhase = null;
+        clearIterations();
+    }
 }

@@ -70,18 +70,30 @@ public final class HoloBioCompensationAlgorithms {
      */
     public static final class MaskSpec {
         public final boolean circular;
+        /** True when the +1 order centre is given (picked or typed) instead of searched. */
         public final boolean manual;
-        public final double cxFrac, cyFrac, rxFrac, ryFrac;
+        public final double cxFrac, cyFrac;
+        /** Half-sizes as fractions of the spectrum size; 0 = automatic (distance to DC / factor). */
+        public final double rxFrac, ryFrac;
+        /** Automatic half-size = distance from the +1 order to DC / factor (Python default 3). */
+        public final double factor;
 
+        public static final double DEFAULT_FACTOR = 3.0;
         public static final MaskSpec AUTO_CIRCLE = new MaskSpec(true, false, 0, 0, 0, 0);
 
         public MaskSpec(boolean circular, boolean manual, double cxFrac, double cyFrac, double rxFrac, double ryFrac) {
+            this(circular, manual, cxFrac, cyFrac, rxFrac, ryFrac, DEFAULT_FACTOR);
+        }
+
+        public MaskSpec(boolean circular, boolean manual, double cxFrac, double cyFrac, double rxFrac, double ryFrac,
+                        double factor) {
             this.circular = circular;
             this.manual = manual;
             this.cxFrac = cxFrac;
             this.cyFrac = cyFrac;
             this.rxFrac = rxFrac;
             this.ryFrac = ryFrac;
+            this.factor = factor > 0 ? factor : DEFAULT_FACTOR;
         }
 
         public static MaskSpec auto(boolean circular) {
@@ -94,6 +106,24 @@ public final class HoloBioCompensationAlgorithms {
          */
         public static MaskSpec manualPx(boolean circular, double cx, double cy, double rx, double ry, int w, int h) {
             return new MaskSpec(circular, true, (cx - w / 2.0) / w, (cy - h / 2.0) / h, rx / w, ry / h);
+        }
+
+        /**
+         * Spatial filter as the Real-Time DHM panel sets it: the +1 order searched or given at
+         * (cx, cy), and the half-sizes typed in pixels or, when not positive, distance to DC / factor.
+         * All pixel values refer to a {@code w×h} centred spectrum.
+         */
+        public static MaskSpec of(boolean circular, boolean centreGiven, double cx, double cy,
+                                  double factor, double rxPx, double ryPx, int w, int h) {
+            double rxF = rxPx > 0 ? rxPx / w : 0;
+            double ryF = ryPx > 0 ? ryPx / h : 0;
+            return new MaskSpec(circular, centreGiven,
+                centreGiven ? (cx - w / 2.0) / w : 0, centreGiven ? (cy - h / 2.0) / h : 0, rxF, ryF, factor);
+        }
+
+        /** True for Python's plain automatic circle (searched centre, distance / 3). */
+        public boolean isPythonAutoCircle() {
+            return !manual && circular && rxFrac <= 0 && ryFrac <= 0 && factor == DEFAULT_FACTOR;
         }
     }
 
@@ -144,18 +174,18 @@ public final class HoloBioCompensationAlgorithms {
         if (spec != null && spec.manual) {
             fx = width / 2.0 + spec.cxFrac * width;
             fy = height / 2.0 + spec.cyFrac * height;
-            rx = Math.max(1.0, spec.rxFrac * width);
-            ry = Math.max(1.0, spec.ryFrac * height);
             prominence = Double.NaN;
         } else {
             double[] peak = orderPeakFrequencyFromShiftedSpectrum(spectrum, width, height, searchRoi);
             fx = peak[0];
             fy = peak[1];
             prominence = peak[2];
-            double r = Math.max(1.0, Math.hypot(fy - height / 2.0, fx - width / 2.0) / 3.0);
-            rx = r;
-            ry = r;
         }
+        // Half-sizes typed by the user, else distance to DC / factor (Python: factor 3).
+        double factor = spec != null ? spec.factor : MaskSpec.DEFAULT_FACTOR;
+        double auto = Math.max(1.0, Math.hypot(fy - height / 2.0, fx - width / 2.0) / factor);
+        rx = spec != null && spec.rxFrac > 0 ? Math.max(1.0, spec.rxFrac * width) : auto;
+        ry = spec != null && spec.ryFrac > 0 ? Math.max(1.0, spec.ryFrac * height) : auto;
         boolean circ = spec == null || spec.circular;
         ComplexField filtered = new ComplexField(width, height);
         for (int y = 0; y < height; y++) {

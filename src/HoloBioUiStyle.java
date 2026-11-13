@@ -517,6 +517,86 @@ public final class HoloBioUiStyle {
             JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) == JOptionPane.YES_OPTION;
     }
 
+    /**
+     * Set scale (Analysis tools): sensor pixel pitch and lateral magnification, prefilled with
+     * the reconstruction's values; the µm per pixel they give is shown as they are typed.
+     * Returns {pitchX, pitchY, M}, or null when cancelled.
+     */
+    public static double[] showSetScaleDialog(java.awt.Frame owner, String imageName,
+                                              double pitchX, double pitchY, double mag) {
+        JDialog dlg = new JDialog(owner, "HoloBio — Set scale", true);
+        dlg.setLayout(new BorderLayout(0, 0));
+        JTextField tfX = numericField(fmtNum(pitchX));
+        JTextField tfY = numericField(fmtNum(pitchY));
+        JTextField tfM = numericField(formatMag(mag));
+        tfX.setToolTipText("Camera sensor pixel pitch X in micrometres (not divided by M).");
+        tfY.setToolTipText("Camera sensor pixel pitch Y in micrometres (not divided by M).");
+        tfM.setToolTipText("Lateral magnification of the microscope, e.g. 40.");
+        JPanel sec = formSection("Scale of " + imageName);
+        GridBagConstraints c = formGbc();
+        addLabelField(sec, c, "Pixel pitch X (µm)", tfX);
+        addLabelField(sec, c, "Pixel pitch Y (µm)", tfY);
+        addLabelField(sec, c, MAG_LABEL, tfM);
+        JLabel result = helperText(" ");
+        c.gridx = 0;
+        c.gridwidth = 2;
+        sec.add(result, c);
+        Runnable refresh = () -> {
+            double x = parseOrNaN(tfX), y = parseOrNaN(tfY), m = parseOrNaN(tfM);
+            result.setText(x > 0 && y > 0 && m > 0
+                ? String.format(java.util.Locale.US, "= %.4g × %.4g µm per pixel (pitch / M)", x / m, y / m)
+                : "Enter positive numbers.");
+        };
+        javax.swing.event.DocumentListener dl = new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refresh.run(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refresh.run(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refresh.run(); }
+        };
+        tfX.getDocument().addDocumentListener(dl);
+        tfY.getDocument().addDocumentListener(dl);
+        tfM.getDocument().addDocumentListener(dl);
+        refresh.run();
+        JPanel body = new JPanel(new BorderLayout());
+        body.setBorder(contentPad());
+        body.add(sec, BorderLayout.CENTER);
+        final double[][] out = new double[1][];
+        JButton ok = primaryButton("Apply");
+        JButton cancel = secondaryButton("Cancel");
+        ok.addActionListener(e -> {
+            double x = parseOrNaN(tfX), y = parseOrNaN(tfY), m = parseOrNaN(tfM);
+            if (!(x > 0 && y > 0 && m > 0)) {
+                JOptionPane.showMessageDialog(dlg, "Pixel pitch and magnification must be greater than zero.",
+                    "HoloBio", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            out[0] = new double[] {x, y, m};
+            dlg.dispose();
+        });
+        cancel.addActionListener(e -> dlg.dispose());
+        dlg.add(body, BorderLayout.CENTER);
+        dlg.add(buildFooter("Applies to the amplitude, phase and Z-scan windows.", cancel, ok), BorderLayout.SOUTH);
+        polish(dlg);
+        dlg.pack();
+        dlg.setLocationRelativeTo(owner);
+        dlg.setVisible(true);
+        return out[0];
+    }
+
+    private static double parseOrNaN(JTextField tf) {
+        try {
+            return Double.parseDouble(tf.getText().trim().replace(',', '.').replace("x", "").replace("×", ""));
+        } catch (NumberFormatException ex) {
+            return Double.NaN;
+        }
+    }
+
+    private static String fmtNum(double v) {
+        if (!(v > 0) || Double.isInfinite(v)) {
+            return "";
+        }
+        return java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
+    }
+
     // ── Icons, busy, window chrome ───────────────────────────────────────────
 
     private static Image APP_ICON;
@@ -1375,6 +1455,45 @@ public final class HoloBioUiStyle {
         lab.setFont(fontHint());
         lab.setForeground(RECORD);
         return lab;
+    }
+
+    /**
+     * Show {@code text} on {@code lab} in large bold red, blinking twice a second, until
+     * {@link #stopBlink} is called — for a wait the user must not miss (writing a recording).
+     * Call on the event thread.
+     */
+    public static Timer startBlink(JLabel lab, String text) {
+        final Font normal = lab.getFont();
+        final Color normalColor = lab.getForeground();
+        lab.putClientProperty("holobio.blink.font", normal);
+        lab.putClientProperty("holobio.blink.color", normalColor);
+        lab.setFont(normal.deriveFont(Font.BOLD, Math.max(14f, normal.getSize2D() + 3f)));
+        lab.setForeground(Color.RED);
+        lab.setText(text);
+        final boolean[] on = {true};
+        Timer t = new Timer(500, e -> {
+            on[0] = !on[0];
+            // The text keeps its space while hidden, so the layout does not jump.
+            lab.setForeground(on[0] ? Color.RED : lab.getParent() != null ? lab.getParent().getBackground() : Color.WHITE);
+        });
+        t.start();
+        return t;
+    }
+
+    /** Stop {@link #startBlink}, restore the label's look and show {@code text}. */
+    public static void stopBlink(Timer t, JLabel lab, String text) {
+        if (t != null) {
+            t.stop();
+        }
+        Object f = lab.getClientProperty("holobio.blink.font");
+        Object c = lab.getClientProperty("holobio.blink.color");
+        if (f instanceof Font) {
+            lab.setFont((Font) f);
+        }
+        if (c instanceof Color) {
+            lab.setForeground((Color) c);
+        }
+        lab.setText(text);
     }
 
     public static void alignLeft(JComponent component) {

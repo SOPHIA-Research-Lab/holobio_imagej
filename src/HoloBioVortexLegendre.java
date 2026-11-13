@@ -46,7 +46,7 @@ final class HoloBioVortexLegendre {
         double k = 2.0 * Math.PI / wavelength;
 
         // Automatic circle = Python spatialFilteringCF; any other choice goes through the shared mask.
-        HoloBioCompensationAlgorithms.FilteredOrder fo = (mask == null || (!mask.manual && mask.circular))
+        HoloBioCompensationAlgorithms.FilteredOrder fo = (mask == null || mask.isPythonAutoCircle())
                 ? HoloBioCompensationAlgorithms.spatialFilteringCf(holo, cols, rows)
                 : HoloBioCompensationAlgorithms.filterOrder(holo, cols, rows,
                         new HoloBioCompensationAlgorithms.RoiRect(0, 0, cols, rows / 2), mask, true);

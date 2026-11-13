@@ -47,7 +47,9 @@ import java.awt.Component;
 import java.awt.GridLayout;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class HoloBio_DHM_Plugin implements PlugIn {
     private static final int FIELD_COLS = 5;
@@ -71,8 +73,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private final HoloBioDhmParams params = new HoloBioDhmParams();
     /** Mirrors HoloBio Python compensation settings dialog. */
     private final HoloBioCompensationSettings compSettings = new HoloBioCompensationSettings();
-    private final HoloBioSpeckleState speckleState = new HoloBioSpeckleState();
-    /** Speckle filter output: updates amplitude/phase ImagePlus and Fiji windows. */
+    /** Speckle state of the current reconstruction (each reconstruction keeps its own). */
+    private HoloBioSpeckleState speckleState = new HoloBioSpeckleState();
+    /**
+     * Speckle filter output. Filters change only what is shown (the propagated field and its
+     * images), never the reconstructed field, so a later propagation or QPI starts from clean data.
+     */
     private final HoloBioToolCallbacks toolCallbacks = new HoloBioToolCallbacks() {
         @Override
         public void onSpeckleFilterResult(boolean amplitudeChannel, FloatProcessor filtered0255) {
@@ -90,11 +96,12 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         @Override
         public void onSpeckleSppResult(float[] fieldRe, float[] fieldIm, int w, int h,
                                        boolean amplitudeChannel, FloatProcessor display0255) {
-            currentFieldRe = fieldRe;
-            currentFieldIm = fieldIm;
-            currentFieldW = w;
-            currentFieldH = h;
-            renderCurrentFieldWithoutPropagation();
+            if (w != currentFieldW || h != currentFieldH) {
+                return;
+            }
+            shownFieldRe = fieldRe.clone();
+            shownFieldIm = fieldIm.clone();
+            renderShownField();
             float[] disp = (float[]) display0255.getPixels();
             if (amplitudeChannel) {
                 speckleState.setFilteredAmplitude(disp);
@@ -107,6 +114,32 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         @Override
         public HoloBioSpeckleState getSpeckleState() {
             return speckleState;
+        }
+
+        @Override
+        public HoloBioToolInputs currentInputs() {
+            activateFromFiji(false);
+            return createToolInputs();
+        }
+
+        @Override
+        public ImagePlus outputImage(boolean amplitude) {
+            ImagePlus imp = WindowManager.getImage(outputTitle(amplitude ? "Amplitude" : "Phase"));
+            return imp != null && imp.getWindow() != null ? imp : null;
+        }
+
+        @Override
+        public ImagePlus qpiPhaseImage() {
+            return phaseImageForActive();
+        }
+
+        @Override
+        public double wavelengthUmFor(ImagePlus phaseImage) {
+            Recon r = phaseImage != null ? reconOfTitle(phaseImage.getTitle()) : null;
+            if (r != null && r.lambda > 0) {
+                return r.lambda;
+            }
+            return params.getWavelengthUm() > 0 ? params.getWavelengthUm() : parseDoubleOr(tfPcLambda, Double.NaN);
         }
     };
 
@@ -167,14 +200,24 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     /** Width and height of {@link #currentFieldRe} / {@link #currentFieldIm} (powers of two after compensation). */
     private int currentFieldW;
     private int currentFieldH;
+    /**
+     * The field as it is shown: the reconstructed field after the last propagation (and any
+     * speckle filter). QPI and Speckle measure this, not the field before propagation.
+     */
+    private float[] shownFieldRe;
+    private float[] shownFieldIm;
     /** Base name of the linked hologram (title without extension); prefixes every output title. */
     private String holoBaseName = "Hologram";
-    /** The Fiji image linked with Use Active Image. Closing it clears the plugin state (fix 8). */
+    /** The Fiji image linked with Use Active Image (or picked by clicking it). */
     private ImagePlus linkedImage;
     private ImageListener linkedImageListener;
-    /** Spatial filter controls (Phase Compensation, fix 10). */
+    /** Spatial filter controls, as in the Real-Time DHM panel (items 1–2). */
+    private static final String ORDER_AUTO = "Automatic";
+    private static final String ORDER_PICKED = "Picked";
     private JComboBox<String> cbMaskShape;
-    private JComboBox<String> cbMaskSize;
+    private JComboBox<String> cbOrderMode;
+    private JComboBox<String> cbFilterView;
+    private JTextField tfMaskFactor;
     private JTextField tfMaskCx;
     private JTextField tfMaskCy;
     private JTextField tfMaskR;
@@ -183,9 +226,41 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private JPanel maskCircleRows;
     private JPanel maskRectRows;
     private JPanel maskCentreRows;
+    private javax.swing.JToggleButton btnPickOrder;
+    /** Mouse listener on the spatial filter window while "Pick +1" is on. */
+    private java.awt.event.MouseListener orderPicker;
+    private ij.gui.ImageCanvas orderPickerCanvas;
     /** Last spatial filter applied and the grid it was applied on, for the filter visualization. */
     private HoloBioCompensationAlgorithms.FilteredOrder lastMask;
     private FloatProcessor lastMaskGrid;
+
+    /**
+     * One linked hologram and what was reconstructed from it. Every hologram linked in this
+     * session keeps its record while any of its windows is open, so the buttons and tools act on
+     * whichever image was clicked last in Fiji (item 6), and closing the hologram keeps its
+     * reconstructions usable.
+     */
+    private static final class Recon {
+        String base;
+        ImagePlus source;
+        ImagePlus hologram;
+        int srcW, srcH;
+        float[] fieldRe, fieldIm, shownRe, shownIm;
+        int fieldW, fieldH;
+        double lambda = Double.NaN, dx = Double.NaN, dy = Double.NaN;
+        /** Lateral magnification M of the image scale (pixel = pitch / M); NaN = not set. */
+        double scaleMag = Double.NaN;
+        /** Pixel pitch used for the image scale (Set scale); NaN = the reconstruction pitch. */
+        double scalePitchX = Double.NaN, scalePitchY = Double.NaN;
+        HoloBioSpeckleState speckle = new HoloBioSpeckleState();
+        HoloBioCompensationAlgorithms.FilteredOrder lastMask;
+        FloatProcessor lastMaskGrid;
+    }
+
+    private final Map<String, Recon> recons = new LinkedHashMap<>();
+    private Recon cur;
+    /** Lateral magnification of the image scale for the current reconstruction (NaN = from pitch only). */
+    private double scaleMag = Double.NaN;
 
     @Override
     public void run(String arg) {
@@ -213,8 +288,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         useActiveButton.setToolTipText("Link the front-most Fiji image as the hologram.");
         useActiveButton.addActionListener(e -> onUseActiveImage());
 
-        JComboBox<String> toolsMenu = new JComboBox<>(new String[] {"Analysis tools", "Speckle", "QPI"});
-        toolsMenu.setToolTipText("Open Speckle or QPI on the current reconstruction.");
+        JComboBox<String> toolsMenu = new JComboBox<>(new String[] {"Analysis tools", "Set scale", "Speckle", "QPI"});
+        toolsMenu.setToolTipText("Set the µm scale, or open Speckle or QPI, on the image clicked last in Fiji.");
         HoloBioUiStyle.styleField(toolsMenu);
         HoloBioUiStyle.sizeField(toolsMenu, 120);
         toolsMenu.addActionListener(e -> {
@@ -403,8 +478,10 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         actions.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 48));
         btnCompensate = HoloBioUiStyle.primaryButton("Compensate");
         btnCompensate.setToolTipText("Run the selected compensation method on the linked hologram.");
-        btnCompensate.addActionListener(e ->
-            HoloBioUiStyle.runBusy(btnCompensate, "Working…", this::run_phase_compensation));
+        btnCompensate.addActionListener(e -> HoloBioUiStyle.runBusy(btnCompensate, "Working…", () -> {
+            activateFromFiji(true);
+            run_phase_compensation();
+        }));
         actions.add(btnCompensate);
         content.add(actions, gbc);
         gbc.gridy++;
@@ -417,29 +494,38 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     /**
-     * Spatial filter: circular or rectangular mask, sized automatically (half-size = distance from
-     * DC to the +1 order / 3, the HoloBio Python default) or manually, in pixels of the hologram's
-     * centred spectrum as shown by Spatial Filter Visualization (fix 10).
+     * Spatial filter, set up as in the Real-Time DHM panel: mask shape; +1 order found
+     * automatically or picked by clicking the spectrum; size from Factor (half-size = distance
+     * from DC to the +1 order / Factor, Python default 3) unless a radius or width/height is
+     * typed. Pixel values refer to the hologram's centred spectrum. The visualization button and
+     * its Unfiltered / Filtered view live here, next to the settings they show (items 1–2).
      */
     private JPanel buildSpatialFilterPanel() {
         JPanel sec = HoloBioUiStyle.formSection("Spatial filter");
         GridBagConstraints c = HoloBioUiStyle.formGbc();
         cbMaskShape = new JComboBox<>(new String[] {"Circular", "Rectangular"});
-        cbMaskSize = new JComboBox<>(new String[] {"Automatic", "Manual"});
+        cbOrderMode = new JComboBox<>(new String[] {ORDER_AUTO, ORDER_PICKED});
         cbMaskShape.setLightWeightPopupEnabled(false);
-        cbMaskSize.setLightWeightPopupEnabled(false);
+        cbOrderMode.setLightWeightPopupEnabled(false);
         setFixedControlSize(cbMaskShape, FORM_COMBO_W + 18);
-        setFixedControlSize(cbMaskSize, FORM_COMBO_W + 18);
+        setFixedControlSize(cbOrderMode, FORM_COMBO_W + 18);
         cbMaskShape.setToolTipText("Shape of the mask that isolates the +1 order.");
-        cbMaskSize.setToolTipText("Automatic: centred on the +1 peak, half-size = distance to DC / 3. "
-                + "Manual: centre and size entered below (pixels of the spectrum shown by Spatial Filter Visualization).");
+        cbOrderMode.setToolTipText("Automatic: the +1 order is searched in the spectrum. "
+                + "Picked: the centre below, set by clicking the spectrum with Pick +1 or typed.");
         HoloBioUiStyle.addLabelField(sec, c, "Mask shape", cbMaskShape);
-        HoloBioUiStyle.addLabelField(sec, c, "Mask size", cbMaskSize);
+        HoloBioUiStyle.addLabelField(sec, c, "+1 order", cbOrderMode);
+
+        tfMaskFactor = new JTextField("3", FIELD_COLS);
+        HoloBioUiStyle.addLabelField(sec, c, "Factor", tfMaskFactor,
+            "Automatic size: half-size = distance from DC to the +1 order / Factor (default 3, as HoloBio Python).");
         tfMaskCx = new JTextField("", FIELD_COLS);
         tfMaskCy = new JTextField("", FIELD_COLS);
         tfMaskR = new JTextField("", FIELD_COLS);
         tfMaskW = new JTextField("", FIELD_COLS);
         tfMaskH = new JTextField("", FIELD_COLS);
+        tfMaskR.setToolTipText("Mask radius in spectrum pixels. Empty = automatic (distance / Factor).");
+        tfMaskW.setToolTipText("Mask width in spectrum pixels. Empty = automatic (2 × distance / Factor).");
+        tfMaskH.setToolTipText("Mask height in spectrum pixels. Empty = automatic (2 × distance / Factor).");
         maskCentreRows = new JPanel(new GridBagLayout());
         GridBagConstraints cc = HoloBioUiStyle.formGbc();
         HoloBioUiStyle.addLabelField(maskCentreRows, cc, "Centre X (px)", tfMaskCx);
@@ -459,21 +545,45 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         sec.add(maskCircleRows, c);
         c.gridy++;
         sec.add(maskRectRows, c);
-        cbMaskShape.addActionListener(e -> syncMaskRows());
-        cbMaskSize.addActionListener(e -> {
-            prefillManualMaskFromLast();
+        c.gridy++;
+
+        cbFilterView = new JComboBox<>(new String[] {"Unfiltered", "Filtered"});
+        cbFilterView.setLightWeightPopupEnabled(false);
+        cbFilterView.setToolTipText("Show the whole spectrum, or only what the mask keeps.");
+        setFixedControlSize(cbFilterView, FORM_COMBO_W);
+        cbFilterView.addActionListener(e -> refreshOpenSpatialFilterWindow());
+        JButton showFilter = HoloBioUiStyle.compactButton("Spatial Filter Visualization");
+        showFilter.setToolTipText("Show the hologram spectrum with the mask the current settings use.");
+        showFilter.addActionListener(e -> showSpatialFilterVisualization());
+        btnPickOrder = HoloBioUiStyle.toggleButton("Pick +1");
+        btnPickOrder.setToolTipText("Click the +1 order on the spectrum to set the mask centre. "
+                + "Set +1 order back to Automatic to search it again.");
+        btnPickOrder.addActionListener(e -> onPickOrderToggled());
+        JPanel viewRow = HoloBioUiStyle.flowLeft(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_1);
+        viewRow.add(showFilter);
+        viewRow.add(cbFilterView);
+        viewRow.add(btnPickOrder);
+        sec.add(viewRow, c);
+
+        cbMaskShape.addActionListener(e -> {
             syncMaskRows();
+            refreshOpenSpatialFilterWindow();
+        });
+        cbOrderMode.addActionListener(e -> {
+            prefillCentreFromLast();
+            syncMaskRows();
+            refreshOpenSpatialFilterWindow();
         });
         syncMaskRows();
         return sec;
     }
 
     private void syncMaskRows() {
-        boolean manual = "Manual".equals(cbMaskSize.getSelectedItem());
+        boolean picked = ORDER_PICKED.equals(cbOrderMode.getSelectedItem());
         boolean circle = "Circular".equals(cbMaskShape.getSelectedItem());
-        maskCentreRows.setVisible(manual);
-        maskCircleRows.setVisible(manual && circle);
-        maskRectRows.setVisible(manual && !circle);
+        maskCentreRows.setVisible(picked);
+        maskCircleRows.setVisible(circle);
+        maskRectRows.setVisible(!circle);
         java.awt.Window w = SwingUtilities.getWindowAncestor(maskCentreRows);
         if (w != null) {
             maskCentreRows.getParent().revalidate();
@@ -481,9 +591,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
-    /** When switching to Manual, start from the mask last applied (in hologram-spectrum pixels). */
-    private void prefillManualMaskFromLast() {
-        if (!"Manual".equals(cbMaskSize.getSelectedItem()) || lastMask == null || srcWidth <= 0
+    /** When switching to Picked, start from the centre of the mask last used (hologram-spectrum pixels). */
+    private void prefillCentreFromLast() {
+        if (!ORDER_PICKED.equals(cbOrderMode.getSelectedItem()) || lastMask == null || srcWidth <= 0
                 || !tfMaskCx.getText().trim().isEmpty()) {
             return;
         }
@@ -491,42 +601,145 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         double sy = srcHeight / (double) lastMask.gridH;
         tfMaskCx.setText(String.format(java.util.Locale.US, "%.1f", srcWidth / 2.0 + (lastMask.fx - lastMask.gridW / 2.0) * sx));
         tfMaskCy.setText(String.format(java.util.Locale.US, "%.1f", srcHeight / 2.0 + (lastMask.fy - lastMask.gridH / 2.0) * sy));
-        tfMaskR.setText(String.format(java.util.Locale.US, "%.1f", lastMask.maskRx * sx));
-        tfMaskW.setText(String.format(java.util.Locale.US, "%.1f", 2 * lastMask.maskRx * sx));
-        tfMaskH.setText(String.format(java.util.Locale.US, "%.1f", 2 * lastMask.maskRy * sy));
+    }
+
+    /** Optional positive number in {@code tf}: NaN when empty, -1 (after a message) when invalid. */
+    private static double optionalPositive(JTextField tf, String what) {
+        String t = tf.getText().trim();
+        if (t.isEmpty()) {
+            return Double.NaN;
+        }
+        try {
+            double v = Double.parseDouble(t.replace(',', '.'));
+            if (v > 0 && !Double.isInfinite(v)) {
+                return v;
+            }
+        } catch (NumberFormatException ignored) {
+            // reported below
+        }
+        HoloBioFijiUi.message("HoloBio", "Spatial filter: " + what + " must be a number greater than zero, or empty.");
+        return -1;
     }
 
     /**
-     * The mask chosen in the panel, for a hologram of {@code w×h}. Manual sizes are in pixels of
-     * that hologram's centred spectrum. Returns null (after a message) when a manual value is invalid.
+     * The mask chosen in the panel, for a hologram of {@code w×h}. Pixel values are in that
+     * hologram's centred spectrum. Returns null (after a message) when a value is invalid.
      */
     private HoloBioCompensationAlgorithms.MaskSpec readMaskSpec(int w, int h) {
         boolean circle = cbMaskShape == null || "Circular".equals(cbMaskShape.getSelectedItem());
-        if (cbMaskSize == null || !"Manual".equals(cbMaskSize.getSelectedItem())) {
+        if (cbOrderMode == null) {
             return HoloBioCompensationAlgorithms.MaskSpec.auto(circle);
         }
-        try {
-            double cx = Double.parseDouble(tfMaskCx.getText().trim());
-            double cy = Double.parseDouble(tfMaskCy.getText().trim());
-            double rx;
-            double ry;
-            if (circle) {
-                rx = Double.parseDouble(tfMaskR.getText().trim());
-                ry = rx;
-            } else {
-                rx = Double.parseDouble(tfMaskW.getText().trim()) / 2.0;
-                ry = Double.parseDouble(tfMaskH.getText().trim()) / 2.0;
-            }
-            if (rx <= 0 || ry <= 0 || cx < 0 || cy < 0 || cx >= w || cy >= h) {
-                HoloBioFijiUi.message("HoloBio", "Manual spatial filter: the centre must lie inside the "
-                        + w + "x" + h + " spectrum and the size must be greater than zero.");
-                return null;
-            }
-            return HoloBioCompensationAlgorithms.MaskSpec.manualPx(circle, cx, cy, rx, ry, w, h);
-        } catch (NumberFormatException ex) {
-            HoloBioFijiUi.message("HoloBio", "Manual spatial filter: enter numeric centre and size values.");
+        double factor = optionalPositive(tfMaskFactor, "Factor");
+        if (factor < 0) {
             return null;
         }
+        if (Double.isNaN(factor)) {
+            factor = HoloBioCompensationAlgorithms.MaskSpec.DEFAULT_FACTOR;
+        }
+        double rx;
+        double ry;
+        if (circle) {
+            rx = optionalPositive(tfMaskR, "Radius");
+            ry = rx;
+        } else {
+            rx = optionalPositive(tfMaskW, "Width");
+            ry = optionalPositive(tfMaskH, "Height");
+            rx = rx > 0 ? rx / 2.0 : rx;
+            ry = ry > 0 ? ry / 2.0 : ry;
+        }
+        if (rx < 0 || ry < 0) {
+            return null;
+        }
+        boolean picked = ORDER_PICKED.equals(cbOrderMode.getSelectedItem());
+        double cx = 0;
+        double cy = 0;
+        if (picked) {
+            try {
+                cx = Double.parseDouble(tfMaskCx.getText().trim());
+                cy = Double.parseDouble(tfMaskCy.getText().trim());
+            } catch (NumberFormatException ex) {
+                HoloBioFijiUi.message("HoloBio", "Spatial filter: +1 order is Picked; click it on the spectrum with "
+                        + "Pick +1, or type its centre X and Y.");
+                return null;
+            }
+            if (cx < 0 || cy < 0 || cx >= w || cy >= h) {
+                HoloBioFijiUi.message("HoloBio", "Spatial filter: the centre must lie inside the "
+                        + w + "x" + h + " spectrum.");
+                return null;
+            }
+        }
+        return HoloBioCompensationAlgorithms.MaskSpec.of(circle, picked, cx, cy, factor,
+            Double.isNaN(rx) ? 0 : rx, Double.isNaN(ry) ? 0 : ry, w, h);
+    }
+
+    /** Pick +1: the next click on the spatial filter window sets the mask centre. */
+    private void onPickOrderToggled() {
+        if (!btnPickOrder.isSelected()) {
+            stopOrderPicking();
+            return;
+        }
+        if (!state.hasHologram()) {
+            btnPickOrder.setSelected(false);
+            HoloBioFijiUi.message("HoloBio", "Link a hologram first (Use Active Image, or click it in Fiji).");
+            return;
+        }
+        showSpatialFilterVisualization();
+        ImagePlus vis = WindowManager.getImage(outputTitle("Spatial filter"));
+        if (vis == null || vis.getCanvas() == null) {
+            btnPickOrder.setSelected(false);
+            return;
+        }
+        stopOrderPicking();
+        orderPickerCanvas = vis.getCanvas();
+        orderPicker = new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent ev) {
+                ij.gui.ImageCanvas cv = orderPickerCanvas;
+                if (cv == null) {
+                    return;
+                }
+                double gx = cv.offScreenXD(ev.getX());
+                double gy = cv.offScreenYD(ev.getY());
+                SwingUtilities.invokeLater(() -> onOrderPicked(gx, gy));
+            }
+        };
+        orderPickerCanvas.addMouseListener(orderPicker);
+        WindowManager.setCurrentWindow(vis.getWindow());
+        vis.getWindow().toFront();
+        IJ.showStatus("HoloBio: click the centre of the +1 order on the spectrum.");
+    }
+
+    private void stopOrderPicking() {
+        if (orderPickerCanvas != null && orderPicker != null) {
+            orderPickerCanvas.removeMouseListener(orderPicker);
+        }
+        orderPicker = null;
+        orderPickerCanvas = null;
+    }
+
+    /** A click on the spectrum grid (gx, gy): set Picked with that centre, in hologram-spectrum pixels. */
+    private void onOrderPicked(double gx, double gy) {
+        stopOrderPicking();
+        btnPickOrder.setSelected(false);
+        if (lastMaskGrid == null || srcWidth <= 0) {
+            return;
+        }
+        int gw = lastMaskGrid.getWidth();
+        int gh = lastMaskGrid.getHeight();
+        if (Math.hypot(gx - gw / 2.0, gy - gh / 2.0) < 4) {
+            HoloBioFijiUi.message("HoloBio", "That is the zero order (centre of the spectrum). Click the +1 order.");
+            return;
+        }
+        double cx = srcWidth / 2.0 + (gx - gw / 2.0) * srcWidth / (double) gw;
+        double cy = srcHeight / 2.0 + (gy - gh / 2.0) * srcHeight / (double) gh;
+        tfMaskCx.setText(String.format(java.util.Locale.US, "%.1f", cx));
+        tfMaskCy.setText(String.format(java.util.Locale.US, "%.1f", cy));
+        cbOrderMode.setSelectedItem(ORDER_PICKED);
+        syncMaskRows();
+        showSpatialFilterVisualization();
+        IJ.showStatus(String.format(java.util.Locale.US,
+            "HoloBio: +1 order picked at (%.1f, %.1f); Compensate uses it.", cx, cy));
     }
 
     private JPanel init_phase_shifting_frame() {
@@ -724,6 +937,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         JButton applyNP = HoloBioUiStyle.primaryButton("Apply");
         applyNP.setToolTipText("Propagate the current field with these parameters.");
         applyNP.addActionListener(e -> HoloBioUiStyle.runBusy(applyNP, "Working…", () -> {
+            activateFromFiji(true);
             if (!readParamsFromNumericalPanel()) {
                 return;
             }
@@ -754,17 +968,13 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private JPanel buildBottomBar() {
         JButton resetButton = HoloBioUiStyle.tertiaryButton("Reset");
-        JButton openOutputsButton = HoloBioUiStyle.secondaryButton("Spatial Filter Visualization");
         JButton saveButton = HoloBioUiStyle.secondaryButton("Save…");
         btnApply = HoloBioUiStyle.primaryButton("Apply");
 
-        resetButton.setToolTipText("Clear the linked hologram and reconstructed outputs.");
-        openOutputsButton.setToolTipText("Show the hologram spectrum with the spatial filter (mask) that compensation uses, "
-                + "at the dimensions of the processed hologram.");
+        resetButton.setToolTipText("Clear the linked holograms and reconstructed outputs.");
         saveButton.setToolTipText("Save Fourier transform, phase, amplitude, or the complex field (.npy).");
         btnApply.setToolTipText("Run the current submodule (compensate, shift, or propagate).");
 
-        openOutputsButton.addActionListener(e -> showSpatialFilterVisualization());
         saveButton.addActionListener(e -> onSave());
         btnApply.addActionListener(e -> {
             if (isAiaSelected()) {
@@ -775,8 +985,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         });
         resetButton.addActionListener(e -> onReset());
 
-        return HoloBioUiStyle.buildActionBar(
-            resetButton, openOutputsButton, saveButton, btnApply);
+        return HoloBioUiStyle.buildActionBar(resetButton, saveButton, btnApply);
     }
 
     private void onUseActiveImage() {
@@ -790,41 +999,207 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     /**
-     * Load a float grayscale hologram from {@code imp} (duplicated; first slice if stack) and link
-     * the plugin to that Fiji image: outputs are named after it (fix 1) and closing it releases
-     * everything derived from it (fix 8).
+     * Link {@code imp} as the hologram: its first plane is kept as a float image, outputs are
+     * named after it (fix 1), and it gets its own reconstruction record. The Fiji image itself is
+     * referenced, not duplicated, so a long stack is not held twice in memory (item 20); phase
+     * shifting reads its planes when it runs.
      */
     private void loadHologramFromImagePlus(ImagePlus imp, String hologramTitle) {
         if (imp == null) {
             return;
         }
-        activeSourceImage = imp.duplicate();
-        if (activeSourceImage.getStackSize() > 1) {
-            if (activeSourceImage.isHyperStack()) {
-                activeSourceImage.setPosition(1, 1, 1);
-            } else {
-                activeSourceImage.setSlice(1);
-            }
-        }
-        ImageProcessor gray = activeSourceImage.getProcessor().convertToFloatProcessor();
-        state.setHologramImage(new ImagePlus(hologramTitle, gray.duplicate()));
+        saveCurrentRecon();
+        activeSourceImage = imp;
+        ImageProcessor first = imp.getStackSize() > 1 ? imp.getStack().getProcessor(1) : imp.getProcessor();
+        FloatProcessor gray = (FloatProcessor) first.convertToFloatProcessor().duplicate();
+        state.setHologramImage(new ImagePlus(hologramTitle, gray));
         srcWidth = gray.getWidth();
         srcHeight = gray.getHeight();
         padOffsetX = 0;
         padOffsetY = 0;
-        holoBaseName = baseNameOf(imp.getTitle());
+        holoBaseName = uniqueBaseFor(imp);
         state.setFourierImage(null);
         state.setAmplitudeImage(null);
         state.setPhaseImage(null);
         currentFieldRe = null;
         currentFieldIm = null;
+        shownFieldRe = null;
+        shownFieldIm = null;
         currentFieldW = 0;
         currentFieldH = 0;
         lastMask = null;
         lastMaskGrid = null;
-        speckleState.clear();
+        scaleMag = Double.NaN;
+        speckleState = new HoloBioSpeckleState();
         linkTo(imp);
+        Recon r = new Recon();
+        r.base = holoBaseName;
+        recons.put(r.base, r);
+        cur = r;
+        saveCurrentRecon();
         IJ.showStatus("HoloBio: hologram linked (" + holoBaseName + ").");
+    }
+
+    /** Output-title base for {@code imp}: its title without extension, made unique among linked holograms. */
+    private String uniqueBaseFor(ImagePlus imp) {
+        String base = baseNameOf(imp.getTitle());
+        Recon existing = recons.get(base);
+        if (existing == null || existing.source == imp || existing.source == null) {
+            return base;
+        }
+        int k = 2;
+        while (recons.containsKey(base + " (" + k + ")")) {
+            k++;
+        }
+        return base + " (" + k + ")";
+    }
+
+    /** Copy the working state into the current reconstruction record. */
+    private void saveCurrentRecon() {
+        Recon r = cur;
+        if (r == null) {
+            return;
+        }
+        r.source = linkedImage;
+        r.hologram = state.getHologramImage();
+        r.srcW = srcWidth;
+        r.srcH = srcHeight;
+        r.fieldRe = currentFieldRe;
+        r.fieldIm = currentFieldIm;
+        r.fieldW = currentFieldW;
+        r.fieldH = currentFieldH;
+        r.shownRe = shownFieldRe;
+        r.shownIm = shownFieldIm;
+        r.speckle = speckleState;
+        r.lastMask = lastMask;
+        r.lastMaskGrid = lastMaskGrid;
+        r.scaleMag = scaleMag;
+    }
+
+    /** Make {@code r} the reconstruction the buttons and tools work on. */
+    private void switchToRecon(Recon r) {
+        if (r == null || r == cur) {
+            return;
+        }
+        saveCurrentRecon();
+        cur = r;
+        holoBaseName = r.base;
+        linkedImage = r.source;
+        activeSourceImage = r.source;
+        state.setHologramImage(r.hologram);
+        srcWidth = r.srcW;
+        srcHeight = r.srcH;
+        currentFieldRe = r.fieldRe;
+        currentFieldIm = r.fieldIm;
+        currentFieldW = r.fieldW;
+        currentFieldH = r.fieldH;
+        shownFieldRe = r.shownRe;
+        shownFieldIm = r.shownIm;
+        speckleState = r.speckle;
+        lastMask = r.lastMask;
+        lastMaskGrid = r.lastMaskGrid;
+        scaleMag = r.scaleMag;
+        state.setFourierImage(null);
+        state.setAmplitudeImage(null);
+        state.setPhaseImage(null);
+        ImagePlus a = WindowManager.getImage(outputTitle("Amplitude"));
+        ImagePlus p = WindowManager.getImage(outputTitle("Phase"));
+        if (a != null) {
+            state.setAmplitudeImage(new ImagePlus("Amplitude", a.getProcessor().duplicate()));
+        }
+        if (p != null) {
+            state.setPhaseImage(new ImagePlus("Phase", p.getProcessor().duplicate()));
+        }
+        // The physical parameters of this reconstruction carry into Numerical Propagation.
+        if (r.lambda > 0 && tfNpLambda != null) {
+            tfNpLambda.setText(fmtParam(r.lambda));
+            tfNpPitchX.setText(fmtParam(r.dx));
+            tfNpPitchY.setText(fmtParam(r.dy));
+        }
+        IJ.showStatus("HoloBio: working on " + r.base + ".");
+    }
+
+    /** The reconstruction an output window belongs to ("<base> – Phase" → base), or null. */
+    private Recon reconOfTitle(String title) {
+        if (title == null) {
+            return null;
+        }
+        int k = title.lastIndexOf(" – ");
+        if (k > 0) {
+            Recon r = recons.get(title.substring(0, k));
+            if (r != null) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    private Recon reconOfSource(ImagePlus imp) {
+        for (Recon r : recons.values()) {
+            if (r.source == imp) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Act on the Fiji image clicked last, as Fiji's own commands do (item 6). A HoloBio output
+     * or a linked hologram switches to its reconstruction. Any other image is linked as a new
+     * hologram when {@code linkNew} is true (Compensate, Phase Shifting, Numerical Propagation).
+     */
+    private void activateFromFiji(boolean linkNew) {
+        ImagePlus a = WindowManager.getCurrentImage();
+        if (a == null) {
+            return;
+        }
+        Recon r = reconOfTitle(a.getTitle());
+        if (r == null) {
+            r = reconOfSource(a);
+        }
+        if (r != null) {
+            switchToRecon(r);
+            return;
+        }
+        if (linkNew && !isHoloBioWindow(a) && a != linkedImage) {
+            loadHologramFromImagePlus(a, "Active Hologram");
+        }
+    }
+
+    /** Plots, figures and pick windows HoloBio made; they are never linked as holograms. */
+    private static boolean isHoloBioWindow(ImagePlus imp) {
+        if (imp.getWindow() instanceof ij.gui.PlotWindow) {
+            return true;
+        }
+        String t = imp.getTitle();
+        return t == null || t.startsWith("HoloBio") || t.startsWith("Speckle") || t.startsWith("Line Profile")
+            || t.startsWith("Phase profiles") || t.startsWith("AIA ") || t.contains("Focus Curve");
+    }
+
+    /**
+     * Phase window QPI measures: the Phase of the reconstruction clicked last (its Amplitude or
+     * hologram counts too). Any other image is measured as it is.
+     */
+    private ImagePlus phaseImageForActive() {
+        ImagePlus a = WindowManager.getCurrentImage();
+        Recon r = a != null ? reconOfTitle(a.getTitle()) : null;
+        if (r == null && a != null) {
+            r = reconOfSource(a);
+        }
+        if (r == null && (a == null || isHoloBioWindow(a))) {
+            r = cur;
+        }
+        if (a != null && r != null && a.getTitle().endsWith("Phase (Z-scan)")) {
+            return a;
+        }
+        if (r != null) {
+            ImagePlus p = WindowManager.getImage(r.base + " – Phase");
+            if (p != null && p.getWindow() != null) {
+                return p;
+            }
+            return a != null && r == reconOfTitle(a.getTitle()) ? a : null;
+        }
+        return a;
     }
 
     /** Image title without its file extension ("holoStar.tif" -> "holoStar"). */
@@ -859,8 +1234,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
                 @Override
                 public void imageClosed(ImagePlus i) {
-                    if (i != null && i == linkedImage) {
-                        SwingUtilities.invokeLater(() -> onLinkedHologramClosed(i));
+                    if (i != null) {
+                        SwingUtilities.invokeLater(() -> onImageClosed(i));
                     }
                 }
             };
@@ -868,12 +1243,53 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         }
     }
 
-    private void onLinkedHologramClosed(ImagePlus closed) {
-        if (closed != linkedImage) {
-            return;
+    /**
+     * A closed hologram leaves its reconstruction usable: its first plane was copied when it was
+     * linked, and its outputs stay open (item 6). A record is released only when neither its
+     * hologram nor any of its output windows is open any more.
+     */
+    private void onImageClosed(ImagePlus closed) {
+        saveCurrentRecon();
+        for (Recon r : new ArrayList<>(recons.values())) {
+            if (r.source == closed) {
+                r.source = null;
+                if (r == cur) {
+                    linkedImage = null;
+                    activeSourceImage = null;
+                }
+            }
         }
-        clearAllState();
-        IJ.showStatus("HoloBio: the linked hologram was closed; its data was released.");
+        for (Recon r : new ArrayList<>(recons.values())) {
+            if (r.source == null && !hasOpenOutputs(r.base, closed)) {
+                recons.remove(r.base);
+                if (r == cur) {
+                    cur = null;
+                    clearAllState();
+                    if (!recons.isEmpty()) {
+                        Recon last = null;
+                        for (Recon x : recons.values()) {
+                            last = x;
+                        }
+                        switchToRecon(last);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean hasOpenOutputs(String base, ImagePlus closing) {
+        int[] ids = WindowManager.getIDList();
+        if (ids == null) {
+            return false;
+        }
+        String prefix = base + " – ";
+        for (int id : ids) {
+            ImagePlus imp = WindowManager.getImage(id);
+            if (imp != null && imp != closing && imp.getTitle() != null && imp.getTitle().startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Drop the hologram and everything computed from it. */
@@ -886,25 +1302,23 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         linkedImage = null;
         currentFieldRe = null;
         currentFieldIm = null;
+        shownFieldRe = null;
+        shownFieldIm = null;
         currentFieldW = 0;
         currentFieldH = 0;
         lastMask = null;
         lastMaskGrid = null;
         srcWidth = 0;
         srcHeight = 0;
-        speckleState.clear();
+        scaleMag = Double.NaN;
+        speckleState = new HoloBioSpeckleState();
         holoBaseName = "Hologram";
     }
 
-    /** Fix 8: processing needs a hologram that is still open in Fiji, not stale data from a closed one. */
+    /** Compensation needs a hologram; one that was closed still counts (its first plane was kept). */
     private boolean requireOpenHologram() {
-        if (!state.hasHologram() || linkedImage == null) {
-            HoloBioFijiUi.message("HoloBio", "No hologram is linked. Open a hologram in Fiji and click Use Active Image.");
-            return false;
-        }
-        if (linkedImage.getWindow() == null && WindowManager.getImage(linkedImage.getID()) == null) {
-            clearAllState();
-            HoloBioFijiUi.message("HoloBio", "The linked hologram was closed. Open it again and click Use Active Image.");
+        if (!state.hasHologram()) {
+            HoloBioFijiUi.message("HoloBio", "No hologram is linked. Click a hologram in Fiji (or use Use Active Image).");
             return false;
         }
         return true;
@@ -912,6 +1326,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     private void onApplyMvp() {
         debugLog("Apply clicked.");
         debugLogSelectionSnapshot("Apply snapshot");
+        activateFromFiji(!(isModulePhaseShift() && SRC_FOLDER.equals(psSourceBox.getSelectedItem())));
         if (!_update_physical_params()) {
             return;
         }
@@ -944,9 +1359,11 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void onReset() {
         if (!HoloBioUiStyle.confirm(null, "Reset DHM",
-                "Clear the linked hologram and all reconstructed outputs?")) {
+                "Clear the linked holograms and all reconstructed outputs?")) {
             return;
         }
+        recons.clear();
+        cur = null;
         clearAllState();
     }
     /** Python-like save menu for FT / phase / amplitude outputs. */
@@ -1011,34 +1428,46 @@ public class HoloBio_DHM_Plugin implements PlugIn {
     }
 
     /**
-     * Show {@code image} as "<hologram> – role". An open window of the same size is updated in
-     * place; a new window is created only the first time or when the size changes.
+     * Show {@code image} as "<hologram> – role". An open window is reused, also when the size
+     * changes (its content is swapped in place): destroying and creating native windows is what
+     * crashes the Intel graphics driver (item 20). Amplitude and phase carry the µm scale, and
+     * keep the ROIs drawn on them (QPI, speckle zones) while their size stays the same.
      */
     private boolean openOutputImageInFiji(ImagePlus image, String role) {
         if (image == null) {
             return false;
         }
         String title = outputTitle(role);
+        boolean scaled = "Amplitude".equals(role) || "Phase".equals(role);
         ImagePlus existing = WindowManager.getImage(title);
-        if (existing != null && existing.getWindow() != null && existing.getStackSize() == 1
-                && existing.getWidth() == image.getWidth() && existing.getHeight() == image.getHeight()) {
-            existing.setProcessor(image.getProcessor().duplicate());
-            existing.setOverlay(image.getOverlay() != null ? image.getOverlay().duplicate() : null);
+        if (existing != null && existing.getWindow() != null) {
+            boolean sameSize = existing.getStackSize() == 1
+                && existing.getWidth() == image.getWidth() && existing.getHeight() == image.getHeight();
+            Overlay keep = image.getOverlay() != null ? image.getOverlay().duplicate()
+                : (sameSize && scaled ? existing.getOverlay() : null);
+            if (sameSize) {
+                existing.setProcessor(image.getProcessor().duplicate());
+            } else {
+                ImagePlus fresh = new ImagePlus(title, image.getProcessor().duplicate());
+                existing.setImage(fresh);
+                existing.setTitle(title);
+            }
+            if (scaled) {
+                applyOutputScale(existing);
+            }
+            existing.setOverlay(keep);
             existing.resetDisplayRange();
             existing.updateAndDraw();
             existing.changes = false;
             return true;
         }
-        if (existing != null) {
-            existing.changes = false;
-            existing.close();
-        }
-        ImagePlus out = image.duplicate();
-        out.deleteRoi();
+        ImagePlus out = new ImagePlus(title, image.getProcessor().duplicate());
         if (image.getOverlay() != null) {
             out.setOverlay(image.getOverlay().duplicate());
         }
-        out.setTitle(title);
+        if (scaled) {
+            applyOutputScale(out);
+        }
         HoloBioFijiUi.showImagePlus(out);
         return true;
     }
@@ -1419,7 +1848,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         lastMaskGrid = vl ? squareCropLikeVortexLegendre(src) : src;
         state.setFourierImage(buildSpatialFilterImage());
         copyParamsToNumericalPanel();
+        recordReconParams();
         update_right_view();
+        refreshOpenSpatialFilterWindow();
         IJ.showStatus(String.format("HoloBio: phase compensation completed (%dx%d, fx=%.1f, fy=%.1f).",
             f.width, f.height, result.fx, result.fy));
     }
@@ -1454,6 +1885,21 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         return java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
     }
 
+    /** A distance in µm written in the largest unit that keeps it ≥ 1 (µm, mm, cm or m). */
+    static String formatUmAuto(double um) {
+        double a = Math.abs(um);
+        if (a >= 1e6) {
+            return String.format(java.util.Locale.US, "%.4g m", um / 1e6);
+        }
+        if (a >= 1e4) {
+            return String.format(java.util.Locale.US, "%.4g cm", um / 1e4);
+        }
+        if (a >= 1e3) {
+            return String.format(java.util.Locale.US, "%.4g mm", um / 1e3);
+        }
+        return String.format(java.util.Locale.US, "%.4g µm", um);
+    }
+
     /**
      * Fix 5/10: log spectrum of the grid the compensation processes (the hologram, or for
      * Vortex-Legendre its square crop), at that grid's own size, with the mask outlined.
@@ -1466,9 +1912,26 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         float[] gp = (float[]) g.getPixels();
         subtractMeanInPlace(gp, gp.length);
         ByteProcessor bp = HoloBioFftDisplay.generateFftLogDisplayRect(g, g.getWidth(), g.getHeight());
-        ImagePlus imp = new ImagePlus("Spatial filter", bp);
         double rx = lastMask.maskRx;
         double ry = lastMask.maskRy;
+        if (cbFilterView != null && "Filtered".equals(cbFilterView.getSelectedItem())) {
+            // What the mask keeps (Real-Time DHM "Filtered" view): everything outside it is black.
+            int gw = bp.getWidth();
+            int gh = bp.getHeight();
+            for (int y = 0; y < gh; y++) {
+                double dy = y - lastMask.fy;
+                for (int x = 0; x < gw; x++) {
+                    double dx = x - lastMask.fx;
+                    boolean keep = lastMask.maskCircular
+                        ? (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
+                        : Math.abs(dx) <= rx && Math.abs(dy) <= ry;
+                    if (!keep) {
+                        bp.set(x, y, 0);
+                    }
+                }
+            }
+        }
+        ImagePlus imp = new ImagePlus("Spatial filter", bp);
         Roi outline = lastMask.maskCircular
             ? new OvalRoi(lastMask.fx - rx, lastMask.fy - ry, 2 * rx, 2 * ry)
             : new Roi(lastMask.fx - rx, lastMask.fy - ry, 2 * rx, 2 * ry);
@@ -1493,7 +1956,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         int gw = grid.getWidth();
         int gh = grid.getHeight();
         float[] gp = (float[]) grid.getPixels();
-        if (vl && !spec.manual && spec.circular) {
+        if (vl && spec.isPythonAutoCircle()) {
             lastMask = HoloBioCompensationAlgorithms.spatialFilteringCf(floatRegionToDouble(gp), gw, gh);
         } else {
             double[] mr = meanRemovedDouble(gp, gp.length);
@@ -1508,8 +1971,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     /** "Spatial Filter Visualization" (fix 5): the mask the current settings use, at the processed size. */
     private void showSpatialFilterVisualization() {
+        activateFromFiji(true);
         if (!state.hasHologram()) {
-            HoloBioFijiUi.message("HoloBio", "Use an active image first.");
+            HoloBioFijiUi.message("HoloBio", "Link a hologram first (click it in Fiji, or Use Active Image).");
             return;
         }
         if (!previewMask()) {
@@ -1518,6 +1982,23 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         ImagePlus img = buildSpatialFilterImage();
         state.setFourierImage(img);
         openOutputImageInFiji(img, "Spatial filter");
+    }
+
+    /** Redraw an open spatial filter window after a setting changed (no new window). */
+    private void refreshOpenSpatialFilterWindow() {
+        ImagePlus open = WindowManager.getImage(outputTitle("Spatial filter"));
+        if (open == null || open.getWindow() == null || !state.hasHologram()) {
+            return;
+        }
+        String pickedX = tfMaskCx != null ? tfMaskCx.getText().trim() : "";
+        if (ORDER_PICKED.equals(cbOrderMode.getSelectedItem()) && pickedX.isEmpty()) {
+            return;     // nothing to show until a centre is picked
+        }
+        if (previewMask()) {
+            ImagePlus img = buildSpatialFilterImage();
+            state.setFourierImage(img);
+            openOutputImageInFiji(img, "Spatial filter");
+        }
     }
 
     /** Remove global mean so FFT matches {@code pyDHM_methods.ERS} / {@link HoloBioCompensationAlgorithms} input. */
@@ -1589,6 +2070,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         srcWidth = ps.width;
         srcHeight = ps.height;
         copyParamsToNumericalPanel();
+        recordReconParams();
         if (cbPsAutoPropagate != null && cbPsAutoPropagate.isSelected()) {
             _propagate_current_field(propOptionsPs, "Angular Spectrum");
         } else {
@@ -1630,6 +2112,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     /** Apply in AIA mode: runs in the background so the progress bar updates. */
     private void startAiaRun() {
+        activateFromFiji(!SRC_FOLDER.equals(psSourceBox.getSelectedItem()));
         if (!readParamsFromPhaseShiftPanel()) {
             return;
         }
@@ -1664,8 +2147,7 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         job.dir = tfPsFolder.getText();
         job.filter = tfPsFilter.getText();
         if (!job.folder) {
-            if (activeSourceImage == null) {
-                HoloBioFijiUi.message("HoloBio", "Use an active image first, or set Frames source to Folder.");
+            if (!sourceStackOpen()) {
                 return null;
             }
             job.stack = activeSourceImage;
@@ -1915,10 +2397,75 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         if (currentFieldRe == null || currentFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
             return;
         }
+        setShownField(currentFieldRe, currentFieldIm);
+    }
+
+    /**
+     * {@code re/im} (field size) becomes what the outputs show and what QPI and Speckle measure.
+     * The speckle state restarts from it, so a filter is never applied to an outdated image.
+     */
+    private void setShownField(float[] re, float[] im) {
+        shownFieldRe = re;
+        shownFieldIm = im;
+        speckleState = new HoloBioSpeckleState();
+        speckleState.setOriginalField(re, im);
+        renderShownField();
+    }
+
+    private void renderShownField() {
+        if (shownFieldRe == null || shownFieldIm == null || currentFieldW <= 0 || currentFieldH <= 0) {
+            return;
+        }
         state.setAmplitudeImage(new ImagePlus("Amplitude",
-            amplitudeToDisplay(currentFieldRe, currentFieldIm, currentFieldW, currentFieldH)));
+            amplitudeToDisplay(shownFieldRe, shownFieldIm, currentFieldW, currentFieldH)));
         state.setPhaseImage(new ImagePlus("Phase",
-            phaseToDisplay(currentFieldRe, currentFieldIm, currentFieldW, currentFieldH)));
+            phaseToDisplay(shownFieldRe, shownFieldIm, currentFieldW, currentFieldH)));
+    }
+
+    /** Parameters that produced the current field, kept with its reconstruction. */
+    private void recordReconParams() {
+        if (cur == null) {
+            return;
+        }
+        cur.lambda = params.getWavelengthUm();
+        cur.dx = params.getPixelPitchXUm();
+        cur.dy = params.getPixelPitchYUm();
+        if (!(scaleMag > 0)) {
+            // The image scale inherits M from the propagation panel of the module that reconstructed it.
+            PropagationUi ui = isModulePhaseShift() ? propOptionsPs : (isModuleNumericalProp() ? null : propOptionsPc);
+            if (ui != null) {
+                scaleMag = ui.getLateralMagnification();
+            }
+        }
+        saveCurrentRecon();
+    }
+
+    /** µm per pixel (x, y) of the outputs: sensor pitch / M; NaN when unknown. */
+    private double[] outputScaleUm() {
+        double dx = cur != null && cur.dx > 0 ? cur.dx : params.getPixelPitchXUm();
+        double dy = cur != null && cur.dy > 0 ? cur.dy : params.getPixelPitchYUm();
+        if (cur != null && cur.scalePitchX > 0) {
+            dx = cur.scalePitchX;
+            dy = cur.scalePitchY;
+        }
+        double m = scaleMag > 0 ? scaleMag : 1.0;
+        if (!(dx > 0) || !(dy > 0)) {
+            return new double[] {Double.NaN, Double.NaN};
+        }
+        return new double[] {dx / m, dy / m};
+    }
+
+    /** Fiji scale of amplitude, phase and Z-scan outputs (Analyze ▸ Measure, ROIs, QPI use it). */
+    private void applyOutputScale(ImagePlus imp) {
+        double[] s = outputScaleUm();
+        if (imp == null || Double.isNaN(s[0])) {
+            return;
+        }
+        ij.measure.Calibration cal = imp.getCalibration().copy();
+        cal.pixelWidth = s[0];
+        cal.pixelHeight = s[1];
+        cal.setUnit("µm");
+        imp.setCalibration(cal);
     }
     private static double[] floatRegionToDouble(float[] region) {
         double[] out = new double[region.length];
@@ -1986,9 +2533,9 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         float[] im = currentFieldIm.clone();
         // z = 0 leaves the field exactly as it is; negative z propagates backwards (fix 9).
         propagateSelectedAlgorithmInPlace(re, im, w, h, zEff, method);
-        state.setAmplitudeImage(new ImagePlus("Amplitude", amplitudeToDisplay(re, im, w, h)));
-        state.setPhaseImage(new ImagePlus("Phase", phaseToDisplay(re, im, w, h)));
-        IJ.showStatus("HoloBio: propagated to z = " + propUi.describeUm(zEff) + ".");
+        setShownField(re, im);
+        recordReconParams();
+        IJ.showStatus("HoloBio: propagated " + method + " to " + propUi.describeWithCamera(zEff) + ".");
     }
 
     /** Fix 11: a stack of amplitude and phase planes from z start to z end. */
@@ -2040,14 +2587,19 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         IJ.showStatus("HoloBio: Z-scan, " + n + " planes from " + ui.describeUm(z0) + " to " + ui.describeUm(z1) + ".");
     }
 
+    /** Z-scan stack; an open window of the same title is reused (item 20). */
     private void showStack(ImageStack stack, String role) {
         String title = outputTitle(role);
-        ImagePlus existing = WindowManager.getImage(title);
-        if (existing != null) {
-            existing.changes = false;
-            existing.close();
-        }
         ImagePlus imp = new ImagePlus(title, stack);
+        applyOutputScale(imp);
+        ImagePlus existing = WindowManager.getImage(title);
+        if (existing != null && existing.getWindow() != null) {
+            existing.setImage(imp);
+            existing.setTitle(title);
+            applyOutputScale(existing);
+            existing.changes = false;
+            return;
+        }
         HoloBioFijiUi.showImagePlus(imp);
     }
 
@@ -2080,22 +2632,25 @@ public class HoloBio_DHM_Plugin implements PlugIn {
                 + "positive and no larger than the range.");
             return;
         }
-        int n = (int) Math.floor((zMax - zMin) / step + 0.5) + 1;
+        // Planes zMin, zMin + step, … up to zMax (Python: np.arange(zmin, zmax + step/2, step)).
+        // The old floor(range/step + 0.5) + 1 added a plane beyond z max when the step did not
+        // divide the range (item 4).
+        int n = autofocusPlaneCount(zMin, zMax, step);
         if (n > 500) {
             HoloBioFijiUi.message("HoloBio", "Autofocus: " + n + " planes requested; use a larger step (at most 500).");
             return;
         }
         java.awt.Rectangle roi = autofocusRoi();
         if (roi == null) {
-            renderCurrentFieldWithoutPropagation();
-            update_right_view();
-            ImagePlus a = WindowManager.getImage(outputTitle("Amplitude"));
-            if (a != null) {
-                WindowManager.setCurrentWindow(a.getWindow());
+            // No region yet: let the user draw one on the amplitude and continue from there,
+            // whatever propagation mode or method is selected (item 5).
+            if (WindowManager.getImage(outputTitle("Amplitude")) == null) {
+                renderCurrentFieldWithoutPropagation();
+                update_right_view();
             }
-            IJ.setTool("rectangle");
-            HoloBioFijiUi.message("HoloBio", "Autofocus needs a region of interest. Draw a rectangle on \""
-                + outputTitle("Amplitude") + "\" around the object to bring into focus, then press Apply again.");
+            ImagePlus a = WindowManager.getImage(outputTitle("Amplitude"));
+            pickRectangleThen(a, "Draw a rectangle around the object to bring into focus, then click Run autofocus.",
+                "Run autofocus", () -> runAutofocusFromUi(ui, method));
             return;
         }
         int w = currentFieldW;
@@ -2124,23 +2679,26 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         float[] re = currentFieldRe.clone();
         float[] im = currentFieldIm.clone();
         propagateSelectedAlgorithmInPlace(re, im, w, h, zs[best], method);
-        state.setAmplitudeImage(new ImagePlus("Amplitude", amplitudeToDisplay(re, im, w, h)));
-        state.setPhaseImage(new ImagePlus("Phase", phaseToDisplay(re, im, w, h)));
+        setShownField(re, im);
+        recordReconParams();
+        // The focus distance goes into the Fixed field, in the units and plane it was entered in,
+        // so Fixed mode reproduces this plane (item 4).
+        ui.setFixedFromPropagatedUm(zs[best]);
 
-        // Focus curve as HoloBio Python draws it (main_DHM_PP plot_in_main_thread): x = z / M^2 in µm,
-        // blue line "metric_nv"/"metric_tenv", red dashed line "Optimal Distance = … µm".
+        // Focus curve as HoloBio Python draws it (blue "metric_nv"/"metric_tenv" line, red dashed
+        // optimum), with x in the units and plane the range was entered in.
         String metricName = tenengrad ? "metric_tenv" : "metric_nv";
         double[] xs = new double[n];
         double yMin = Double.POSITIVE_INFINITY;
         double yMax = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
-            xs[i] = ui.toObjectUm(zs[i]);
+            xs[i] = ui.toDisplayUnits(zs[i]);
             yMin = Math.min(yMin, scores[i]);
             yMax = Math.max(yMax, scores[i]);
         }
         double pad = (yMax - yMin) * 0.05 + 1e-12;
         double xBest = xs[best];
-        Plot plot = new Plot("Focus Curve \u2013 " + metricName, "Propagation Distance (\u00b5m)", "Sharpness Metric");
+        Plot plot = new Plot("Focus Curve \u2013 " + metricName, ui.distanceAxisLabel(), "Sharpness Metric");
         double xPad = (xs[n - 1] - xs[0]) * 0.05;     // matplotlib-like margin so an edge optimum stays visible
         plot.setLimits(xs[0] - xPad, xs[n - 1] + xPad, yMin - pad, yMax + pad);
         plot.setColor(Color.BLUE);
@@ -2151,7 +2709,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         plot.addPoints(new double[] {xBest, xBest}, new double[] {yMin - pad, yMax + pad}, Plot.LINE);
         plot.setColor(Color.BLACK);
         plot.setLineWidth(1);
-        plot.addLegend(metricName + "\n" + String.format(java.util.Locale.US, "Optimal Distance = %.2f \u00b5m", xBest));
+        plot.addLegend(metricName + "\n" + String.format(java.util.Locale.US, "Optimal Distance = %.4g %s",
+            xBest, ui.unitLabel()));
         plot.setFrameSize(640, 384);
         if (!java.awt.GraphicsEnvironment.isHeadless() && !Boolean.getBoolean("holobio.noPlots")) {
             // One focus-curve window: a new run replaces the previous curve instead of adding a window.
@@ -2165,14 +2724,28 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             }
         }
         lastAutofocusPlot = plot;
-        IJ.showStatus("HoloBio: autofocus best z = " + ui.describeUm(zs[best]) + " (" + n + " planes).");
+        IJ.showStatus("HoloBio: autofocus best " + ui.describeWithCamera(zs[best]) + " (" + n
+            + " planes); copied to Fixed distance.");
     }
 
-    /** Rectangle drawn on the amplitude (or phase) output window, clipped to the field. */
+    /** Number of planes zMin + k·step not beyond zMax + step/2 (as Python's np.arange). */
+    static int autofocusPlaneCount(double zMin, double zMax, double step) {
+        return Math.max(1, (int) Math.ceil((zMax - zMin) / step + 0.5 - 1e-9));
+    }
+
+    /**
+     * Autofocus region: an area ROI on the image clicked last when it has the field's size (the
+     * hologram, amplitude, phase or a Z-scan plane), else one on the amplitude or phase output.
+     */
     private java.awt.Rectangle autofocusRoi() {
-        for (String role : new String[] {"Amplitude", "Phase"}) {
-            ImagePlus imp = WindowManager.getImage(outputTitle(role));
-            if (imp == null || imp.getRoi() == null || !imp.getRoi().isArea()) {
+        List<ImagePlus> candidates = new ArrayList<>();
+        candidates.add(WindowManager.getCurrentImage());
+        candidates.add(WindowManager.getImage(outputTitle("Amplitude")));
+        candidates.add(WindowManager.getImage(outputTitle("Phase")));
+        candidates.add(linkedImage);
+        for (ImagePlus imp : candidates) {
+            if (imp == null || imp.getRoi() == null || !imp.getRoi().isArea()
+                    || imp.getWidth() != currentFieldW || imp.getHeight() != currentFieldH) {
                 continue;
             }
             java.awt.Rectangle r = imp.getRoi().getBounds().intersection(new java.awt.Rectangle(0, 0, currentFieldW, currentFieldH));
@@ -2181,6 +2754,45 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             }
         }
         return null;
+    }
+
+    /**
+     * Rectangle tool on {@code target}, with a small always-on-top helper; {@code then} runs when
+     * the user confirms. No window is created or closed besides the helper.
+     */
+    private void pickRectangleThen(ImagePlus target, String instructions, String okText, Runnable then) {
+        if (target == null || target.getWindow() == null) {
+            HoloBioFijiUi.message("HoloBio", "Reconstruct first, then draw a rectangle on the amplitude.");
+            return;
+        }
+        WindowManager.setCurrentWindow(target.getWindow());
+        target.getWindow().toFront();
+        IJ.setTool("rectangle");
+        JDialog helper = new JDialog((Frame) null, "HoloBio — region", false);
+        helper.setAlwaysOnTop(true);
+        helper.setLayout(new BorderLayout(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_2));
+        JLabel lab = new JLabel("<html><body style='width:260px'>" + instructions + "</body></html>");
+        lab.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_3,
+            HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_3));
+        helper.add(lab, BorderLayout.CENTER);
+        JButton ok = HoloBioUiStyle.primaryButton(okText);
+        JButton cancel = HoloBioUiStyle.secondaryButton("Cancel");
+        helper.add(HoloBioUiStyle.buildFooter("On \"" + target.getTitle() + "\"", cancel, ok), BorderLayout.SOUTH);
+        ok.addActionListener(e -> {
+            if (target.getRoi() == null || !target.getRoi().isArea()) {
+                JOptionPane.showMessageDialog(helper, "Draw a rectangle on the image first.", "HoloBio",
+                    JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            helper.dispose();
+            WindowManager.setCurrentWindow(target.getWindow());
+            then.run();
+        });
+        cancel.addActionListener(e -> helper.dispose());
+        helper.pack();
+        java.awt.Window iw = target.getWindow();
+        helper.setLocation(iw.getX() + 20, iw.getY() + 20);
+        helper.setVisible(true);
     }
 
     private static double[] roiAmplitude(float[] re, float[] im, int w, java.awt.Rectangle r) {
@@ -2263,6 +2875,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void _on_tools_select(String selectedOption) {
         debugLog("Tools menu selected: " + selectedOption);
+        activateFromFiji(false);
+        if ("Set scale".equals(selectedOption)) apply_set_scale();
         if ("QPI".equals(selectedOption) || "Bio-Analysis".equals(selectedOption)) apply_QPI();
         if ("Speckle".equals(selectedOption)) apply_speckle();
         if ("Speckle Filter".equals(selectedOption)) apply_speckle_filter();
@@ -2270,7 +2884,45 @@ public class HoloBio_DHM_Plugin implements PlugIn {
 
     private void apply_QPI() {
         debugLog("Tools: QPI dialog requested.");
-        HoloBioFijiUi.showQpiDialog(dialogOwnerOrNull(), createToolInputs());
+        HoloBioFijiUi.showQpiDialog(dialogOwnerOrNull(), createToolInputs(), toolCallbacks);
+    }
+
+    /**
+     * Set scale (item 14): pixel pitch and lateral magnification, inherited from the
+     * reconstruction, give the µm per pixel of its amplitude, phase and Z-scan windows. QPI
+     * and Fiji's own measurements read that scale from the windows.
+     */
+    private void apply_set_scale() {
+        double[] s = outputScaleUm();
+        double pitchX = cur != null && cur.scalePitchX > 0 ? cur.scalePitchX
+            : (cur != null && cur.dx > 0 ? cur.dx : parseDoubleOr(tfPcPitchX, 3.75));
+        double pitchY = cur != null && cur.scalePitchY > 0 ? cur.scalePitchY
+            : (cur != null && cur.dy > 0 ? cur.dy : parseDoubleOr(tfPcPitchY, pitchX));
+        double m = scaleMag > 0 ? scaleMag : (propOptionsPc != null ? propOptionsPc.getLateralMagnification() : 1.0);
+        double[] chosen = HoloBioUiStyle.showSetScaleDialog(dialogOwnerOrNull(), holoBaseName, pitchX, pitchY, m);
+        if (chosen == null) {
+            return;
+        }
+        if (cur == null) {
+            HoloBioFijiUi.message("HoloBio", "Reconstruct a hologram first; the scale applies to its outputs.");
+            return;
+        }
+        cur.scalePitchX = chosen[0];
+        cur.scalePitchY = chosen[1];
+        scaleMag = chosen[2];
+        saveCurrentRecon();
+        int n = 0;
+        for (String role : new String[] {"Amplitude", "Phase", "Amplitude (Z-scan)", "Phase (Z-scan)"}) {
+            ImagePlus imp = WindowManager.getImage(outputTitle(role));
+            if (imp != null) {
+                applyOutputScale(imp);
+                imp.repaintWindow();
+                n++;
+            }
+        }
+        double[] now = outputScaleUm();
+        IJ.showStatus(String.format(java.util.Locale.US, "HoloBio: scale %.4g µm/px set on %d window(s) of %s.",
+            now[0], n, holoBaseName));
     }
 
     /** Opens Speckle dialog (HoloBio Python speckle panel). */
@@ -2288,19 +2940,16 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         return ij instanceof java.awt.Frame ? (java.awt.Frame) ij : null;
     }
 
+    /** Tools work on the field as shown (after propagation and speckle filtering), items 8 and 13. */
     private HoloBioToolInputs createToolInputs() {
-        return HoloBioToolInputs.fromState(state, currentFieldRe, currentFieldIm, currentFieldW, currentFieldH,
-            params, readLateralMagnificationForTools());
-    }
-
-    private double readLateralMagnificationForTools() {
-        if (isModulePhaseShift()) {
-            return propOptionsPs.getLateralMagnification();
-        }
-        if (isModuleNumericalProp()) {
-            return propOptionsNp.getLateralMagnification();
-        }
-        return propOptionsPc.getLateralMagnification();
+        float[] re = shownFieldRe != null ? shownFieldRe : currentFieldRe;
+        float[] im = shownFieldIm != null ? shownFieldIm : currentFieldIm;
+        HoloBioDhmParams p = new HoloBioDhmParams();
+        p.setWavelengthUm(cur != null && cur.lambda > 0 ? cur.lambda : params.getWavelengthUm());
+        p.setPixelPitchXUm(cur != null && cur.dx > 0 ? cur.dx : params.getPixelPitchXUm());
+        p.setPixelPitchYUm(cur != null && cur.dy > 0 ? cur.dy : params.getPixelPitchYUm());
+        return HoloBioToolInputs.fromState(state, re, im, currentFieldW, currentFieldH,
+            p, scaleMag > 0 ? scaleMag : 1.0);
     }
 
     private void change_menu_to(String name) {
@@ -2338,13 +2987,23 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         return n;
     }
 
+    /** Phase shifting from the active stack reads its planes, so the stack must still be open. */
+    private boolean sourceStackOpen() {
+        if (activeSourceImage == null || activeSourceImage.getStack() == null
+                || activeSourceImage.getStack().getSize() < 1 || activeSourceImage.getProcessor() == null) {
+            HoloBioFijiUi.message("HoloBio", "No stack is linked. Click the phase-shifted stack in Fiji "
+                + "(or use Use Active Image), or set Frames source to Folder.");
+            return false;
+        }
+        return true;
+    }
+
     /** Frames from the chosen source. requiredFrames = 0 means all frames (at least 3). */
     private List<FloatProcessor> collectPhaseShiftFrames(int requiredFrames) {
         if (SRC_FOLDER.equals(psSourceBox.getSelectedItem())) {
             return folderFrames(tfPsFolder.getText(), tfPsFilter.getText(), requiredFrames, "Frames", null);
         }
-        if (activeSourceImage == null) {
-            HoloBioFijiUi.message("HoloBio", "Use an active image first, or set Frames source to Folder.");
+        if (!sourceStackOpen()) {
             return null;
         }
         return stackFrames(activeSourceImage, requiredFrames, "Frames");
@@ -2442,7 +3101,15 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         currentFieldIm = im.clone();
         currentFieldW = w;
         currentFieldH = h;
-        speckleState.setOriginalField(currentFieldRe, currentFieldIm);
+        shownFieldRe = currentFieldRe;
+        shownFieldIm = currentFieldIm;
+        if (cur == null) {
+            // e.g. phase shifting from a folder with no hologram linked: give the result a record too.
+            Recon r = new Recon();
+            r.base = holoBaseName;
+            recons.put(r.base, r);
+            cur = r;
+        }
     }
 
     /** Amplitude display aligned with Python: (amp − min) / (max − min) → 0…255. */
@@ -2536,6 +3203,8 @@ public class HoloBio_DHM_Plugin implements PlugIn {
         private final JTextField afStepField;
         private final JLabel lblFixedDist, lblZStart, lblZEnd, lblZStep, lblAfMin, lblAfMax, lblAfStep;
         private final JComboBox<String> autofocusMetricBox;
+        /** "= … at the camera (z·M²)" under the fixed distance of the phase modules. */
+        private final JLabel cameraHint;
         private final JPanel cardPanel;
         private final CardLayout cardLayout;
         private String distanceUnit = "µm";
@@ -2565,13 +3234,15 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             HoloBioUiStyle.addLabelField(root, pc, "Distance unit", distanceUnitBox);
 
             lateralMagField = new JTextField(HoloBioUiStyle.formatMag(40.0), FIELD_COLS);
-            if (!scaleAxialWithMagnification) {
-                // Numerical Propagation uses the distances exactly as typed (no M^2, as HoloBio Python);
-                // M still sets the µm-per-pixel scale of the QPI and Speckle tools.
-                lateralMagField.setToolTipText("Lateral magnification M, used for the µm scale of the QPI / Speckle "
-                    + "tools. Numerical Propagation distances are used as entered (not multiplied by M\u00b2).");
+            if (scaleAxialWithMagnification) {
+                // Phase compensation / shifting: distances are entered at the sample and propagated
+                // z*M^2 at the camera, as HoloBio Python. Numerical Propagation uses distances as typed
+                // and has no M (it never changed its propagation); the image scale is set with
+                // Analysis tools > Set scale.
+                lateralMagField.setToolTipText("Lateral magnification M. Distances below are at the sample; "
+                    + "the field is propagated z·M² at the camera. M also sets the µm scale (pitch / M).");
+                HoloBioUiStyle.addLabelField(root, pc, HoloBioUiStyle.MAG_LABEL, lateralMagField);
             }
-            HoloBioUiStyle.addLabelField(root, pc, HoloBioUiStyle.MAG_LABEL, lateralMagField);
 
             cardLayout = new CardLayout();
             cardPanel = HoloBioUiStyle.huggingCardPanel(cardLayout);
@@ -2581,7 +3252,22 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             GridBagConstraints fc = HoloBioUiStyle.formGbc();
             fixedDistanceField = new JTextField("", FIELD_COLS);
             lblFixedDist = HoloBioUiStyle.addLabelField(fixedCard, fc,
-                scaleAxialWithMagnification ? "Distance (µm)" : "Fixed z (µm)", fixedDistanceField);
+                scaleAxialWithMagnification ? "Distance at sample (µm)" : "Distance (µm)", fixedDistanceField);
+            cameraHint = HoloBioUiStyle.helperText(" ");
+            if (scaleAxialWithMagnification) {
+                fc.gridx = 0;
+                fc.gridwidth = 2;
+                fixedCard.add(cameraHint, fc);
+                fc.gridy++;
+                fc.gridwidth = 1;
+                javax.swing.event.DocumentListener hint = new javax.swing.event.DocumentListener() {
+                    @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refreshCameraHint(); }
+                    @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refreshCameraHint(); }
+                    @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refreshCameraHint(); }
+                };
+                fixedDistanceField.getDocument().addDocumentListener(hint);
+                lateralMagField.getDocument().addDocumentListener(hint);
+            }
             cardPanel.add(fixedCard, "FIXED");
 
             JPanel zCard = new JPanel(new GridBagLayout());
@@ -2635,38 +3321,66 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             if (updatingDistanceUi) return;
             String next = (String) distanceUnitBox.getSelectedItem();
             if (next == null || next.equals(distanceUnit)) return;
-            double fixedUm = parseDistUm(fixedDistanceField, scaleAxialWithMagnification ? 5000.0 : 0.0);
-            double z0Um = parseDistUm(zScanZMinField, 1000.0);
-            double z1Um = parseDistUm(zScanZMaxField, 9000.0);
-            double stepUm = parseDistUm(zScanStepField, 100.0);
-            double af0Um = parseDistUm(afZMinField, 1000.0);
-            double af1Um = parseDistUm(afZMaxField, 9000.0);
-            double afStUm = parseDistUm(afStepField, 100.0);
+            JTextField[] fields = {fixedDistanceField, zScanZMinField, zScanZMaxField, zScanStepField,
+                afZMinField, afZMaxField, afStepField};
+            // Only values the user typed are converted; empty fields stay empty (they used to be
+            // filled with hidden defaults such as 5000 µm when the unit changed, item 3).
+            double[] um = new double[fields.length];
+            for (int i = 0; i < fields.length; i++) {
+                um[i] = requiredUm(fields[i]);
+            }
             distanceUnit = next;
             updatingDistanceUi = true;
             try {
                 refreshDistanceLabels();
-                fixedDistanceField.setText(fmtDist(fixedUm));
-                zScanZMinField.setText(fmtDist(z0Um));
-                zScanZMaxField.setText(fmtDist(z1Um));
-                zScanStepField.setText(fmtDist(stepUm));
-                afZMinField.setText(fmtDist(af0Um));
-                afZMaxField.setText(fmtDist(af1Um));
-                afStepField.setText(fmtDist(afStUm));
+                for (int i = 0; i < fields.length; i++) {
+                    if (!Double.isNaN(um[i])) {
+                        fields[i].setText(fmtDist(um[i]));
+                    }
+                }
             } finally {
                 updatingDistanceUi = false;
             }
+            refreshCameraHint();
+        }
+
+        /** "= 16 mm at the camera (z·M²)" under the fixed distance of the phase modules. */
+        private void refreshCameraHint() {
+            if (cameraHint == null || !scaleAxialWithMagnification) {
+                return;
+            }
+            double z = effectiveZFixedUm();
+            cameraHint.setText(Double.isNaN(z) ? " "
+                : "= " + formatUmAuto(z) + " at the camera (z·M², M = " + HoloBioUiStyle.formatMag(magnification()) + ")");
+        }
+
+        /** Put a propagated distance (µm) into the Fixed field, in the entered plane and units. */
+        void setFixedFromPropagatedUm(double propagatedUm) {
+            fixedDistanceField.setText(fmtDist(scaleAxialWithMagnification ? propagatedUm / scaleImg() : propagatedUm));
+        }
+
+        /** Axis label for distances in the entered plane and units. */
+        String distanceAxisLabel() {
+            return (scaleAxialWithMagnification ? "Distance at sample (" : "Propagation distance (") + distanceUnit + ")";
+        }
+
+        /** "z = 10 µm at the sample (16 mm at the camera)", or "z = 10 µm" in Numerical Propagation. */
+        String describeWithCamera(double propagatedUm) {
+            if (!scaleAxialWithMagnification) {
+                return "z = " + describeUm(propagatedUm);
+            }
+            return "z = " + describeUm(propagatedUm) + " at the sample (" + formatUmAuto(propagatedUm) + " at the camera)";
         }
 
         private void refreshDistanceLabels() {
             String u = distanceUnit;
-            lblFixedDist.setText(scaleAxialWithMagnification ? "Distance (" + u + "):" : "Fixed z (" + u + "):");
-            lblZStart.setText("z start (" + u + "):");
-            lblZEnd.setText("z end (" + u + "):");
-            lblZStep.setText("Step (" + u + "):");
-            lblAfMin.setText("z min (" + u + "):");
-            lblAfMax.setText("z max (" + u + "):");
-            lblAfStep.setText("Step (" + u + "):");
+            lblFixedDist.setText(scaleAxialWithMagnification ? "Distance at sample (" + u + ")" : "Distance (" + u + ")");
+            lblZStart.setText("z start (" + u + ")");
+            lblZEnd.setText("z end (" + u + ")");
+            lblZStep.setText("Step (" + u + ")");
+            lblAfMin.setText("z min (" + u + ")");
+            lblAfMax.setText("z max (" + u + ")");
+            lblAfStep.setText("Step (" + u + ")");
         }
 
         private double umPerUnit() {
@@ -2677,9 +3391,16 @@ public class HoloBio_DHM_Plugin implements PlugIn {
             return parseDoubleOr(tf, fallbackUm / umPerUnit()) * umPerUnit();
         }
 
+        /** Distance in the selected unit: whole numbers from 100 up, else 4 significant digits, no trailing zeros. */
         private String fmtDist(double um) {
             double v = um / umPerUnit();
-            return Math.abs(v) >= 100 ? String.format("%.0f", v) : String.format("%.4g", v);
+            if (Math.abs(v) >= 100) {
+                return String.format(java.util.Locale.US, "%.0f", v);
+            }
+            if (v == 0) {
+                return "0";
+            }
+            return new java.math.BigDecimal(v).round(new java.math.MathContext(4)).stripTrailingZeros().toPlainString();
         }
 
         private void syncModeCards() {

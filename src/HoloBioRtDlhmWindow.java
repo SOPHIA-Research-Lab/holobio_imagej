@@ -816,6 +816,11 @@ public class HoloBioRtDlhmWindow extends JFrame {
         HoloBioRtRecorder.Target t =
                 (HoloBioRtRecorder.Target) cbRecordTarget.getSelectedItem();
         recorder.start(t);
+        if (recorder.writeErrorMessage() != null) {
+            setStatus("Cannot record: " + recorder.writeErrorMessage());
+            recorder.discard();
+            return;
+        }
         btnRecStart.setEnabled(false);
         btnRecStop .setEnabled(true);
         cbRecordTarget.setEnabled(false);
@@ -878,14 +883,20 @@ public class HoloBioRtDlhmWindow extends JFrame {
         }
         final File out = HoloBioRtUtil.realPath(fc.getSelectedFile());
         setStatus("Writing " + n + " frames…");
+        // Blinking red on the record label until the file is written: closing Fiji or the
+        // window before then loses the recording.
+        final javax.swing.Timer blink = HoloBioUiStyle.startBlink(lblRec,
+                "● WRITING " + n + " FRAMES… do not close");
 
         Thread writer = new Thread(() -> {
             try {
                 String what = recorder.save(out, fps);
                 recorder.discard();
                 setStatus("Saved " + what + " → " + out.getName());
+                SwingUtilities.invokeLater(() -> HoloBioUiStyle.stopBlink(blink, lblRec, "Saved → " + out.getName()));
             } catch (Exception ex) {
                 setStatus("Save failed: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> HoloBioUiStyle.stopBlink(blink, lblRec, "Save failed"));
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
                         ex.getMessage(), "Recording", JOptionPane.ERROR_MESSAGE));
             }
@@ -898,14 +909,16 @@ public class HoloBioRtDlhmWindow extends JFrame {
         if (!recorder.isRecording()) {
             if (recorder.hitBudget()) {
                 SwingUtilities.invokeLater(() -> {
-                    lblRec.setText("Buffer full — stopped");
+                    lblRec.setText("Disk nearly full — stopped");
                     btnRecStart.setEnabled(true);
                     btnRecStop .setEnabled(true);
                 });
             }
             return;
         }
-        final String txt = String.format("● REC  %d frames", recorder.frameCount());
+        final int dropped = recorder.droppedCount();
+        final String txt = String.format("● REC  %d frames%s", recorder.frameCount(),
+                dropped > 0 ? "  (" + dropped + " dropped)" : "");
         SwingUtilities.invokeLater(() -> lblRec.setText(txt));
     }
 

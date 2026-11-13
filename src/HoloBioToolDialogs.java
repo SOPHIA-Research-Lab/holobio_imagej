@@ -1,6 +1,7 @@
 import ij.IJ;
 import ij.ImageJ;
 import ij.ImagePlus;
+import ij.ImageStack;
 import ij.gui.Line;
 import ij.gui.OvalRoi;
 import ij.gui.Overlay;
@@ -67,13 +68,46 @@ public final class HoloBioToolDialogs {
     private static final java.util.concurrent.atomic.AtomicReference<HoloBioToolInputs> qpiInputsRef =
             new java.util.concurrent.atomic.AtomicReference<>();
 
-    /**
-     * QPI Measurements dialog. Microstructure UI is disabled (code kept in
-     * {@link HoloBioMicrostructureMath} / unused tab builders below for possible revival).
-     */
+    /** QPI output (item 17): Δφ only, or Δφ converted to a thickness or a refractive index. */
+    static final String QPI_OUT_DPHI = "Δφ only";
+    static final String QPI_OUT_THICKNESS = "Thickness";
+    static final String QPI_OUT_INDEX = "Index";
+
+    /** Plugin that opened QPI; resolves the phase image of the Fiji image clicked last. */
+    private static volatile HoloBioToolCallbacks qpiCallbacks;
+    /** Refreshes the "Measures:" line of the open QPI dialog. */
+    private static Runnable qpiRefreshTarget;
+    /** Values typed in this session; nothing is filled in silently (item 16). */
+    private static String lastNs = "";
+    private static String lastNm = "";
+    private static String lastThickness = "";
+
+    /** What QPI computes, read and checked when Apply is pressed. */
+    static final class QpiSettings {
+        String output = QPI_OUT_DPHI;
+        double nSample = Double.NaN;
+        double nMedium = Double.NaN;
+        double thicknessUm = Double.NaN;
+        double lambdaUm = Double.NaN;
+    }
+
     public static void showBioAnalysisDialog(Frame owner, HoloBioToolInputs inputs) {
+        showBioAnalysisDialog(owner, inputs, null);
+    }
+
+    /**
+     * QPI on the phase image of the reconstruction the user clicked last (item 15: phase only).
+     * The µm scale comes from that image (Analysis tools ▸ Set scale), so QPI has no dimension
+     * fields of its own (item 14); λ comes from the reconstruction (item 13). ROIs are drawn on
+     * the phase window itself and stay there afterwards (item 18).
+     */
+    public static void showBioAnalysisDialog(Frame owner, HoloBioToolInputs inputs, HoloBioToolCallbacks callbacks) {
         qpiInputsRef.set(inputs);
+        qpiCallbacks = callbacks;
         if (qpiDialog != null && qpiDialog.isDisplayable()) {
+            if (qpiRefreshTarget != null) {
+                qpiRefreshTarget.run();
+            }
             bringWindowFront(qpiDialog);
             return;
         }
@@ -91,71 +125,86 @@ public final class HoloBioToolDialogs {
         });
         dlg.setLayout(new BorderLayout(0, 0));
 
-        String defPx = inputs != null && inputs.defaultPixelUm > 0
-            ? String.format("%.4g", inputs.defaultPixelUm) : "2.40";
-        String defMag = inputs != null && inputs.defaultMag > 0
-            ? HoloBioUiStyle.formatMag(inputs.defaultMag) : HoloBioUiStyle.formatMag(40.0);
+        JLabel targetLabel = HoloBioUiStyle.hintHtml(" ", 300);
+        targetLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        // The description is wrapped at a fixed width and the window grows if it needs more
+        // lines, so the text is never squeezed into a narrow, clipped column.
+        Runnable refreshTarget = () -> {
+            targetLabel.setText(describeQpiTarget(resolveQpiTarget()));
+            targetLabel.revalidate();
+            if (dlg.isShowing() && targetLabel.getHeight() < targetLabel.getPreferredSize().height) {
+                Dimension now = dlg.getSize();
+                dlg.pack();
+                dlg.setSize(Math.max(now.width, dlg.getWidth()), Math.max(now.height, dlg.getHeight()));
+            }
+        };
+        qpiRefreshTarget = refreshTarget;
+        JButton refreshBtn = HoloBioUiStyle.compactButton("Refresh");
+        refreshBtn.setToolTipText("Click a phase image in Fiji, then Refresh (Apply always uses the image clicked last).");
+        refreshBtn.addActionListener(e -> refreshTarget.run());
+        JPanel imageSec = HoloBioUiStyle.formSection("Phase image");
+        GridBagConstraints imgC = HoloBioUiStyle.formGbc();
+        imgC.gridx = 0;
+        imgC.gridwidth = 2;
+        imgC.fill = GridBagConstraints.HORIZONTAL;
+        imgC.weightx = 1.0;
+        imageSec.add(targetLabel, imgC);
+        imgC.gridy++;
+        JPanel refreshRow = flowLeft();
+        refreshRow.add(refreshBtn);
+        imageSec.add(refreshRow, imgC);
 
-        JTextField tfPixelUm = HoloBioUiStyle.numericField(defPx);
-        JTextField tfMag = HoloBioUiStyle.numericField(defMag);
-        JComboBox<String> srcCombo = new JComboBox<>(new String[]{"Phase", "Amplitude", "Hologram"});
         JComboBox<String> roiTypeCombo = new JComboBox<>(new String[]{
-            "Line (profile)", "Circle (oval)", "Two regions (\u0394\u03c6)", "Two points (\u0394\u03c6)"});
-        JComboBox<String> modeCombo = new JComboBox<>(new String[]{"Thickness", "Index"});
-        JTextField tfIndSample = HoloBioUiStyle.numericField("1.00");
-        JTextField tfIndMedium = HoloBioUiStyle.numericField("1.33");
-        JTextField tfThicknessKnown = HoloBioUiStyle.numericField("10.0");
+            "Line", "Circle"});
+        JComboBox<String> outputCombo = new JComboBox<>(new String[]{
+            QPI_OUT_DPHI, QPI_OUT_THICKNESS, QPI_OUT_INDEX});
+        outputCombo.setSelectedItem(QPI_OUT_THICKNESS);
+        JTextField tfIndSample = HoloBioUiStyle.numericField(lastNs);
+        JTextField tfIndMedium = HoloBioUiStyle.numericField(lastNm);
+        JTextField tfThicknessKnown = HoloBioUiStyle.numericField(lastThickness);
         JTextField tfZones = HoloBioUiStyle.numericField("1");
 
-        tfPixelUm.setToolTipText("Camera pixel size in micrometres.");
-        tfMag.setToolTipText("Objective magnification M, e.g. 40 or 40x. Scale = pixel size / M.");
-        srcCombo.setToolTipText("Image used to draw or load ROIs.");
-        roiTypeCombo.setToolTipText("Line = phase profile; Circle = profile around an oval; "
-            + "Two regions / Two points = phase difference between them.");
-        modeCombo.setToolTipText("Thickness from Δφ and indices, or index from a known thickness.");
-        tfIndSample.setToolTipText("Sample refractive index n_s. Used in Thickness mode.");
-        tfIndMedium.setToolTipText("Medium refractive index n_m. Thickness mode: t = λΔφ / (2π|n_s − n_m|). "
-            + "Index mode: n_s = n_m + λΔφ / (2π t).");
-        tfThicknessKnown.setToolTipText("Known thickness in micrometres. Used in Index mode.");
+        roiTypeCombo.setToolTipText("Line = phase profile; Circle = profile around a circle.");
+        outputCombo.setToolTipText("Δφ only, or Δφ converted to a thickness (needs n_s, n_m) "
+            + "or to the sample index (needs n_m and a known thickness).");
+        tfIndSample.setToolTipText("Sample refractive index n_s (Thickness).");
+        tfIndMedium.setToolTipText("Medium refractive index n_m. Thickness: t = λΔφ / (2π|n_s − n_m|). "
+            + "Index: n_s = n_m + λΔφ / (2π t).");
+        tfThicknessKnown.setToolTipText("Known sample thickness in micrometres (Index).");
         tfZones.setToolTipText("Number of ROIs to draw (integer ≥ 1).");
-
-        JPanel dim = HoloBioUiStyle.formSection("Dimensions");
-        GridBagConstraints dimC = HoloBioUiStyle.formGbc();
-        HoloBioUiStyle.addLabelField(dim, dimC, "Pixel size (µm)", tfPixelUm);
-        HoloBioUiStyle.addLabelField(dim, dimC, HoloBioUiStyle.MAG_LABEL, tfMag);
-        HoloBioUiStyle.addLabelField(dim, dimC, "Draw on", srcCombo);
 
         JPanel meas = HoloBioUiStyle.formSection("QPI measurements");
         GridBagConstraints measC = HoloBioUiStyle.formGbc();
         HoloBioUiStyle.addLabelField(meas, measC, "ROI type", roiTypeCombo);
-        HoloBioUiStyle.addLabelField(meas, measC, "Measurement mode", modeCombo);
+        HoloBioUiStyle.addLabelField(meas, measC, "Output", outputCombo);
         HoloBioUiStyle.addLabelField(meas, measC, "Zones", tfZones,
             "Number of ROIs to draw. Each zone is measured separately (integer ≥ 1).");
 
         JPanel refr = HoloBioUiStyle.formSection("Refractive parameters");
         GridBagConstraints refrC = HoloBioUiStyle.formGbc();
-        JLabel lblNs = HoloBioUiStyle.addLabelField(refr, refrC, "Sample index n_s", tfIndSample,
-            "Sample refractive index n_s. Used when Measurement mode = Thickness.");
-        JLabel lblNm = HoloBioUiStyle.addLabelField(refr, refrC, "Medium index n_m", tfIndMedium,
-            "Medium refractive index n_m. Used when Measurement mode = Thickness.");
+        JLabel lblNs = HoloBioUiStyle.addLabelField(refr, refrC, "Sample index n_s", tfIndSample);
+        JLabel lblNm = HoloBioUiStyle.addLabelField(refr, refrC, "Medium index n_m", tfIndMedium);
         JLabel lblThick = HoloBioUiStyle.addLabelField(refr, refrC, "Known thickness (µm)", tfThicknessKnown);
-        JLabel thickHelp = HoloBioUiStyle.helperText("Enabled when Measurement mode = Index.");
+        JLabel refrHelp = HoloBioUiStyle.helperText(" ");
         refrC.gridx = 0;
         refrC.gridwidth = 2;
         refrC.insets = new java.awt.Insets(0, 0, 0, 0);
-        refr.add(thickHelp, refrC);
+        refr.add(refrHelp, refrC);
 
         Runnable syncQpiMode = () -> {
-            boolean thm = "Thickness".equals(modeCombo.getSelectedItem());
-            tfIndSample.setEnabled(thm);
-            tfIndMedium.setEnabled(true);
-            lblNs.setEnabled(thm);
-            lblNm.setEnabled(true);
-            tfThicknessKnown.setEnabled(!thm);
-            lblThick.setEnabled(!thm);
-            thickHelp.setForeground(thm ? HoloBioUiStyle.TEXT_MUTED : HoloBioUiStyle.TEXT);
+            String out = String.valueOf(outputCombo.getSelectedItem());
+            boolean thick = QPI_OUT_THICKNESS.equals(out);
+            boolean index = QPI_OUT_INDEX.equals(out);
+            tfIndSample.setEnabled(thick);
+            lblNs.setEnabled(thick);
+            tfIndMedium.setEnabled(thick || index);
+            lblNm.setEnabled(thick || index);
+            tfThicknessKnown.setEnabled(index);
+            lblThick.setEnabled(index);
+            refrHelp.setText(thick ? "Thickness needs n_s and n_m."
+                : index ? "Index needs n_m and the known thickness." : "Δφ only needs no parameters.");
         };
-        modeCombo.addActionListener(e -> syncQpiMode.run());
+        outputCombo.addActionListener(e -> syncQpiMode.run());
         syncQpiMode.run();
 
         JButton applyQpi = HoloBioUiStyle.primaryButton("Apply QPI");
@@ -165,7 +214,7 @@ public final class HoloBioToolDialogs {
         JPanel body = new JPanel();
         body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
         body.setBorder(HoloBioUiStyle.contentPad());
-        HoloBioUiStyle.stackSections(body, dim, meas, refr);
+        HoloBioUiStyle.stackSections(body, imageSec, meas, refr);
 
         JButton close = HoloBioUiStyle.tertiaryButton("Close");
         close.addActionListener(ev -> dlg.setVisible(false));
@@ -173,51 +222,49 @@ public final class HoloBioToolDialogs {
         dlg.add(HoloBioUiStyle.buildHeader("QPI", null, null), BorderLayout.NORTH);
         dlg.add(body, BorderLayout.CENTER);
         dlg.add(HoloBioUiStyle.buildActionBar(close, loadRoiFile, applyQpi), BorderLayout.SOUTH);
+        dlg.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowActivated(java.awt.event.WindowEvent e) {
+                refreshTarget.run();
+            }
+        });
 
-        applyQpi.addActionListener(ev -> HoloBioUiStyle.runBusy(applyQpi, "Working…", () -> {
-            HoloBioToolInputs in = qpiInputsRef.get();
-            if (in == null || !in.hasPhaseField()) {
-                JOptionPane.showMessageDialog(dlg, "Reconstruct phase first.",
+        applyQpi.addActionListener(ev -> {
+            ImagePlus target = resolveQpiTarget();
+            refreshTarget.run();
+            if (target == null) {
+                JOptionPane.showMessageDialog(dlg, "Click a phase image in Fiji first (reconstruct one if needed).",
                         "HoloBio QPI", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
-            double pixelUm = HoloBioRtUtil.parseDouble(tfPixelUm, 3.75);
-            double mag = HoloBioRtUtil.parseDouble(tfMag, 40.0);
-            if (!(mag > 1e-12)) mag = 1.0;
+            QpiSettings s = readQpiSettings(dlg, target, outputCombo, tfIndSample, tfIndMedium, tfThicknessKnown);
+            if (s == null) {
+                return;
+            }
             int zones;
-            try { zones = Integer.parseInt(tfZones.getText().trim()); }
-            catch (NumberFormatException ex) {
+            try {
+                zones = Integer.parseInt(tfZones.getText().trim());
+            } catch (NumberFormatException ex) {
+                zones = 0;
+            }
+            if (zones < 1) {
                 JOptionPane.showMessageDialog(dlg, "Zones must be an integer ≥ 1.",
                         "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
                 return;
             }
-            if (zones < 1) {
-                JOptionPane.showMessageDialog(dlg, "Zones must be ≥ 1.",
-                        "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-            boolean thicknessMode = "Thickness".equals(modeCombo.getSelectedItem());
-            double nSample = HoloBioRtUtil.parseDouble(tfIndSample, 1.33);
-            double nMedium = HoloBioRtUtil.parseDouble(tfIndMedium, 1.0);
-            double thicknessUm = HoloBioRtUtil.parseDouble(tfThicknessKnown, 10.0);
             String roiType = String.valueOf(roiTypeCombo.getSelectedItem());
-            boolean circleRoi = roiType.startsWith("Circle");
-            String source = String.valueOf(srcCombo.getSelectedItem());
-            dlg.setVisible(false);
-            if (roiType.startsWith("Two")) {
-                runQpiPairs(dlg, in, source, roiType.startsWith("Two points"), thicknessMode,
-                        nSample, nMedium, thicknessUm);
-                return;
-            }
-            runQpiWithRoiManager(dlg, in, zones, source, circleRoi, thicknessMode,
-                    nSample, nMedium, thicknessUm, pixelUm, mag);
-        }));
+            runQpiOnImage(dlg, target, zones, roiType.startsWith("Circle"), s);
+        });
 
         loadRoiFile.addActionListener(ev -> {
-            HoloBioToolInputs in = qpiInputsRef.get();
-            if (in == null || !in.hasPhaseField()) {
-                JOptionPane.showMessageDialog(dlg, "Reconstruct phase first.",
+            ImagePlus target = resolveQpiTarget();
+            if (target == null) {
+                JOptionPane.showMessageDialog(dlg, "Click a phase image in Fiji first (reconstruct one if needed).",
                         "HoloBio QPI", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            QpiSettings s = readQpiSettings(dlg, target, outputCombo, tfIndSample, tfIndMedium, tfThicknessKnown);
+            if (s == null) {
                 return;
             }
             JFileChooser fc = new JFileChooser(
@@ -225,27 +272,130 @@ public final class HoloBioToolDialogs {
                             "Documents/DECIMO SEMESTRE/AVANZADO 2/sample images/benchmark"));
             fc.setDialogTitle("Load shared ROIs (rois_*.txt)");
             if (fc.showOpenDialog(dlg) != JFileChooser.APPROVE_OPTION) return;
-            double pixelUm = HoloBioRtUtil.parseDouble(tfPixelUm, 3.75);
-            double mag = HoloBioRtUtil.parseDouble(tfMag, 40.0);
-            if (!(mag > 1e-12)) mag = 1.0;
-            boolean thicknessMode = "Thickness".equals(modeCombo.getSelectedItem());
-            double nSample = HoloBioRtUtil.parseDouble(tfIndSample, 1.33);
-            double nMedium = HoloBioRtUtil.parseDouble(tfIndMedium, 1.0);
-            double thicknessUm = HoloBioRtUtil.parseDouble(tfThicknessKnown, 10.0);
-            String source = String.valueOf(srcCombo.getSelectedItem());
             try {
-                runQpiFromRoiFile(dlg, in, fc.getSelectedFile(), source, thicknessMode,
-                        nSample, nMedium, thicknessUm, pixelUm, mag);
+                runQpiFromRoiFile(dlg, target, fc.getSelectedFile(), s);
             } catch (Exception ex) {
                 JOptionPane.showMessageDialog(dlg, "Cannot load ROIs: " + ex.getMessage(),
                         "HoloBio QPI", JOptionPane.ERROR_MESSAGE);
             }
         });
 
+        refreshTarget.run();               // fill the text before sizing the window
         HoloBioUiStyle.polish(dlg);
         HoloBioUiStyle.packTight(dlg, 440, 560);
         dlg.setLocationRelativeTo(owner);
         bringWindowFront(dlg);
+    }
+
+    /** The phase image QPI measures: what the plugin resolves, else the image clicked last. */
+    private static ImagePlus resolveQpiTarget() {
+        HoloBioToolCallbacks cb = qpiCallbacks;
+        ImagePlus t;
+        if (cb != null) {
+            t = cb.qpiPhaseImage();
+        } else {
+            t = ij.WindowManager.getCurrentImage();
+            if (t != null && t.getWindow() instanceof ij.gui.PlotWindow) {
+                t = null;
+            }
+        }
+        return t != null && t.getWindow() != null ? t : null;
+    }
+
+    private static double qpiWavelengthFor(ImagePlus target) {
+        HoloBioToolCallbacks cb = qpiCallbacks;
+        double lam = cb != null ? cb.wavelengthUmFor(target) : Double.NaN;
+        if (!(lam > 0)) {
+            HoloBioToolInputs in = qpiInputsRef.get();
+            lam = in != null ? in.wavelengthUm : Double.NaN;
+        }
+        return lam;
+    }
+
+    /** "Measures: <title> · 0.0938 µm/px · λ = 0.633 µm" for the dialog. */
+    private static String describeQpiTarget(ImagePlus t) {
+        if (t == null) {
+            return "<html><p style='width:260px'>No phase image. Click one in Fiji, then <b>Refresh</b>.</p></html>";
+        }
+        ij.measure.Calibration cal = t.getCalibration();
+        String scale = cal.scaled()
+            ? String.format(java.util.Locale.US, "%.4g %s/px", cal.pixelWidth, cal.getUnit())
+            : "no scale (pixels): use Analysis tools ▸ Set scale";
+        double lam = qpiWavelengthFor(t);
+        String lamText = lam > 0 ? String.format(java.util.Locale.US, "λ = %.4g µm", lam) : "λ unknown";
+        return "<html><p style='width:260px'>Measures: <b>" + escapeHtml(t.getTitle()) + "</b><br>"
+            + scale + "  ·  " + lamText + "</p></html>";
+    }
+
+    private static String escapeHtml(String s) {
+        return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * Parameters for the chosen output, checked: an empty or invalid value is reported instead
+     * of being replaced by a hidden default (item 16). Null after a message.
+     */
+    private static QpiSettings readQpiSettings(Window parent, ImagePlus target, JComboBox<String> outputCombo,
+                                               JTextField tfNs, JTextField tfNm, JTextField tfThick) {
+        QpiSettings s = new QpiSettings();
+        s.output = String.valueOf(outputCombo.getSelectedItem());
+        lastNs = tfNs.getText().trim();
+        lastNm = tfNm.getText().trim();
+        lastThickness = tfThick.getText().trim();
+        if (QPI_OUT_DPHI.equals(s.output)) {
+            return s;
+        }
+        s.lambdaUm = qpiWavelengthFor(target);
+        if (!(s.lambdaUm > 0)) {
+            JOptionPane.showMessageDialog(parent, "The wavelength of this image is unknown; reconstruct it in "
+                + "HoloBio first, or choose Δφ only.", "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+            return null;
+        }
+        s.nMedium = requiredNumber(parent, tfNm, "Medium index n_m");
+        if (Double.isNaN(s.nMedium)) {
+            return null;
+        }
+        if (QPI_OUT_THICKNESS.equals(s.output)) {
+            s.nSample = requiredNumber(parent, tfNs, "Sample index n_s");
+            if (Double.isNaN(s.nSample)) {
+                return null;
+            }
+            if (Math.abs(s.nSample - s.nMedium) < 1e-9) {
+                JOptionPane.showMessageDialog(parent, "n_s and n_m must differ to compute a thickness.",
+                    "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+                return null;
+            }
+        } else {
+            s.thicknessUm = requiredNumber(parent, tfThick, "Known thickness (µm)");
+            if (Double.isNaN(s.thicknessUm)) {
+                return null;
+            }
+            if (s.thicknessUm <= 0) {
+                JOptionPane.showMessageDialog(parent, "The known thickness must be greater than zero.",
+                    "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+                return null;
+            }
+        }
+        return s;
+    }
+
+    /** A number typed in {@code tf}; NaN (after a message) when empty or not a number. */
+    private static double requiredNumber(Window parent, JTextField tf, String what) {
+        String t = tf.getText().trim().replace(',', '.');
+        if (!t.isEmpty()) {
+            try {
+                double v = Double.parseDouble(t);
+                if (!Double.isNaN(v) && !Double.isInfinite(v)) {
+                    return v;
+                }
+            } catch (NumberFormatException ignored) {
+                // reported below
+            }
+        }
+        JOptionPane.showMessageDialog(parent, what + " is required for this output; enter a number.",
+            "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+        tf.requestFocusInWindow();
+        return Double.NaN;
     }
 
     /**
@@ -399,235 +549,156 @@ public final class HoloBioToolDialogs {
         return out;
     }
 
-    private static void runQpiWithRoiManager(Window hideDlg, HoloBioToolInputs in, int zones, String source,
-                                           boolean circleRoi, boolean thicknessMode, double nSample, double nMedium,
-                                           double thicknessUm, double pixelUm, double mag) {
-        float[] phaseForQpi = phaseForQpiPythonParity(in);
-
-        // Build display ByteProcessor from the user-selected source image
-        ByteProcessor bp = buildDisplayBp(in, source, phaseForQpi);
-        if (bp == null) {
-            JOptionPane.showMessageDialog(hideDlg,
-                "No image available for source \"" + source + "\". Reconstruct first.",
-                "HoloBio QPI", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-
-        RoiManager rm = HoloBioFijiUi.roiManagerForPicking();
-        rm.reset();
-
-        String roiLabel = circleRoi ? "circle/oval" : "straight-line";
-        String ijTool   = circleRoi ? "oval" : "line";
-        ImagePlus imp = new ImagePlus(
-            "HoloBio QPI — draw " + roiLabel + " ROIs on " + source + " (" + zones + ")", bp);
-        String instr = circleRoi
-            ? "Draw " + zones + " oval/circle ROI(s). Press t after each. Then Done."
-            : "Draw " + zones + " straight line(s). Press t after each. Then Done.";
-
-        runRoiPickSession(imp, instr, zones, hideDlg, ijTool, roiLabel, ok -> {
+    /** Line or circle profiles drawn on the phase window itself (items 15, 18, 19). */
+    private static void runQpiOnImage(Window hideDlg, ImagePlus target, int zones, boolean circle, QpiSettings s) {
+        String roiLabel = circle ? "circle" : "straight line";
+        String instr = circle
+            ? "Draw " + zones + " circle(s) on the phase (oval tool; hold Shift for a circle). Press t after each, then Done."
+            : "Draw " + zones + " straight line(s) on the phase. Press t after each, then Done.";
+        runRoiPickOnImage(target, instr, zones, hideDlg, circle ? "oval" : "line", roiLabel, ok -> {
             if (!ok) return;
-            RoiManager rmDone = RoiManager.getInstance();
-            if (rmDone == null || rmDone.getCount() < zones) {
+            RoiManager rm = RoiManager.getInstance();
+            List<Roi> rois = new ArrayList<>();
+            for (int i = 0; rm != null && i < rm.getCount() && rois.size() < zones; i++) {
+                Roi r = rm.getRoi(i);
+                if (circle && r instanceof OvalRoi) {
+                    rois.add(asCircle((OvalRoi) r));
+                } else if (!circle && r instanceof Line) {
+                    rois.add(r);
+                }
+            }
+            if (rois.size() < zones) {
                 JOptionPane.showMessageDialog(hideDlg,
-                    "Expected " + zones + " " + roiLabel + " ROI(s), found "
-                        + (rmDone != null ? rmDone.getCount() : 0) + ".",
+                    "Expected " + zones + " " + roiLabel + "(s) drawn with the "
+                        + (circle ? "oval" : "straight line") + " tool, found " + rois.size() + ".",
                     "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
                 return;
             }
-            computeAndShowQpiResults(hideDlg, in, phaseForQpi, zones, circleRoi, thicknessMode,
-                nSample, nMedium, thicknessUm, pixelUm, mag, rmDone);
+            computeQpiResults(hideDlg, target, rois, circle, s);
         });
     }
 
-    /**
-     * Run QPI using shared {@code rois_*.txt} (same file as RT DHM Load ROIs / Python).
-     * Lines become straight profiles; rects use the horizontal midline for the plot curve
-     * and all pixels inside for Δφ stats via a temporary line ROI for the RoiManager path…
-     * Actually rects are converted to midline Lines for the standard QPI plot path.
-     */
-    private static void runQpiFromRoiFile(Window parent, HoloBioToolInputs in, File roiFile,
-                                         String source, boolean thicknessMode,
-                                         double nSample, double nMedium, double thicknessUm,
-                                         double pixelUm, double mag) throws Exception {
-        float[] phaseForQpi = phaseForQpiPythonParity(in);
-        if (phaseForQpi == null) {
-            JOptionPane.showMessageDialog(parent, "No phase data.",
-                    "HoloBio QPI", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
+    /** The circle with an oval's centre and mean radius (QPI uses circles only, item 19). */
+    static OvalRoi asCircle(OvalRoi ov) {
+        double cx = ov.getXBase() + ov.getFloatWidth() / 2.0;
+        double cy = ov.getYBase() + ov.getFloatHeight() / 2.0;
+        double r = 0.25 * (ov.getFloatWidth() + ov.getFloatHeight());
+        OvalRoi c = new OvalRoi(cx - r, cy - r, 2 * r, 2 * r);
+        c.setName(ov.getName());
+        return c;
+    }
 
+    /**
+     * Run QPI on shared {@code rois_*.txt} lines (same file as RT DHM Load ROIs / Python); a
+     * rectangle becomes its horizontal midline. The ROIs are drawn on the phase window.
+     */
+    private static void runQpiFromRoiFile(Window parent, ImagePlus target, File roiFile, QpiSettings s) throws Exception {
         HoloBioRtRoiFile.Bundle b = HoloBioRtRoiFile.load(roiFile);
         if (b.rois.isEmpty()) {
-            JOptionPane.showMessageDialog(parent, "No ROIs in file.",
-                    "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(parent, "No ROIs in file.", "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
             return;
         }
-
+        int w = target.getWidth();
+        int h = target.getHeight();
         double sx = 1.0, sy = 1.0;
-        if (b.width > 0 && b.height > 0
-                && (in.fieldWidth != b.width || in.fieldHeight != b.height)) {
-            sx = in.fieldWidth  / (double) b.width;
-            sy = in.fieldHeight / (double) b.height;
+        if (b.width > 0 && b.height > 0 && (w != b.width || h != b.height)) {
+            sx = w / (double) b.width;
+            sy = h / (double) b.height;
         }
-
-        RoiManager rm = HoloBioFijiUi.roiManagerForPicking();
-        rm.reset();
-        int nLines = 0;
+        List<Roi> rois = new ArrayList<>();
         for (HoloBioRtRoiFile.Roi r : b.rois) {
-            if (r.rect) {
-                // Midline of the rectangle (same convention as RT live plot)
-                double x1 = r.x1 * sx, y1 = (r.y1 + 0.5 * r.y2) * sy;
-                double x2 = (r.x1 + r.x2) * sx, y2 = y1;
-                Line ln = new Line(x1, y1, x2, y2);
-                ln.setName(r.name);
-                rm.addRoi(ln);
-                nLines++;
-            } else {
-                Line ln = new Line(r.x1 * sx, r.y1 * sy, r.x2 * sx, r.y2 * sy);
-                ln.setName(r.name);
-                rm.addRoi(ln);
-                nLines++;
-            }
+            Line ln = r.rect
+                ? new Line(r.x1 * sx, (r.y1 + 0.5 * r.y2) * sy, (r.x1 + r.x2) * sx, (r.y1 + 0.5 * r.y2) * sy)
+                : new Line(r.x1 * sx, r.y1 * sy, r.x2 * sx, r.y2 * sy);
+            ln.setName(r.name);
+            rois.add(ln);
         }
-
-        // Overlay on the phase pick image so the user sees the shared ROIs
-        ByteProcessor bp = buildDisplayBp(in, source, phaseForQpi);
-        if (bp != null) {
-            ImagePlus imp = new ImagePlus("HoloBio QPI — ROIs from " + roiFile.getName(), bp);
-            Overlay ov = new Overlay();
-            for (int i = 0; i < rm.getCount(); i++) {
-                Roi roi = rm.getRoi(i);
-                roi.setStrokeColor(java.awt.Color.YELLOW);
-                ov.add(roi);
-            }
-            imp.setOverlay(ov);
-            HoloBioFijiUi.showImagePlus(imp);
-        }
-
-        computeAndShowQpiResults(parent, in, phaseForQpi, nLines, false, thicknessMode,
-                nSample, nMedium, thicknessUm, pixelUm, mag, rm);
-        HoloBioFijiUi.log("[HoloBio QPI] Loaded " + nLines + " ROI(s) from " + roiFile.getName()
+        computeQpiResults(parent, target, rois, false, s);
+        HoloBioFijiUi.log("[HoloBio QPI] Loaded " + rois.size() + " ROI(s) from " + roiFile.getName()
                 + (sx != 1.0 || sy != 1.0
-                    ? String.format(" (scaled ×%.3g/×%.3g to %d×%d)", sx, sy, in.fieldWidth, in.fieldHeight)
+                    ? String.format(" (scaled ×%.3g/×%.3g to %d×%d)", sx, sy, w, h)
                     : ""));
     }
 
-    /** Build a ByteProcessor from the selected display source (Phase / Amplitude / Hologram). */
-    private static ByteProcessor buildDisplayBp(HoloBioToolInputs in, String source, float[] phaseForQpi) {
-        if ("Amplitude".equals(source) && in.hasAmplitudeDisplay0255()) {
-            float[] amp = in.amplitudeDisplay0255;
-            byte[] gray = new byte[amp.length];
-            for (int i = 0; i < gray.length; i++) gray[i] = (byte) Math.min(255, Math.max(0, (int) amp[i]));
-            return new ByteProcessor(in.fieldWidth, in.fieldHeight, gray, null);
+    /**
+     * Phase in [0, 2π] from the image QPI measures (current slice). HoloBio outputs and other
+     * 8-bit / 0–255 images map 0–255 to 0–2π, as HoloBio Python's {@code phase_8bit / 255 · 2π};
+     * a 32-bit image already in radians is used as it is ([−π, π] is shifted by π).
+     */
+    static float[] phase0to2pi(ImagePlus imp) {
+        ImageProcessor ip = imp.getProcessor();
+        float[] v = (float[]) ip.convertToFloatProcessor().getPixels();
+        float[] out = v == ip.getPixels() ? v.clone() : v;
+        float mn = Float.POSITIVE_INFINITY, mx = Float.NEGATIVE_INFINITY;
+        for (float x : out) {
+            if (x < mn) mn = x;
+            if (x > mx) mx = x;
         }
-        if ("Hologram".equals(source) && in.hasHologram()) {
-            // Always resample to the reconstruction field size so ROIs map 1:1 onto phase.
-            byte[] gray = resampleHologramToField(in);
-            return new ByteProcessor(in.fieldWidth, in.fieldHeight, gray, null);
-        }
-        // Default: Phase. phaseForQpi is already in [0, 2π] (Python's phase_8bit / 255 · 2π), so it maps
-        // straight back to 0–255; phaseToBytePickImage expects [-π, π] and would clip half to white.
-        if (phaseForQpi != null && phaseForQpi.length == in.fieldWidth * in.fieldHeight) {
-            byte[] gray = new byte[phaseForQpi.length];
-            for (int i = 0; i < gray.length; i++) {
-                int v = (int) Math.round(phaseForQpi[i] / (2.0 * Math.PI) * 255.0);
-                gray[i] = (byte) Math.min(255, Math.max(0, v));
-            }
-            return new ByteProcessor(in.fieldWidth, in.fieldHeight, gray, null);
-        }
-        return HoloBioToolInputs.phaseToBytePickImage(in.phaseRadians, in.fieldWidth, in.fieldHeight);
-    }
-
-    /** Nearest-neighbour resize of the hologram onto the reconstructed field grid. */
-    private static byte[] resampleHologramToField(HoloBioToolInputs in) {
-        float[] holo = in.hologram;
-        int hw = in.holoWidth, hh = in.holoHeight;
-        int fw = in.fieldWidth, fh = in.fieldHeight;
-        float mn = holo[0], mx = holo[0];
-        for (float v : holo) { if (v < mn) mn = v; if (v > mx) mx = v; }
-        float inv = mx > mn + 1e-12f ? 255f / (mx - mn) : 0f;
-        byte[] out = new byte[fw * fh];
-        for (int y = 0; y < fh; y++) {
-            int sy = Math.min(hh - 1, y * hh / fh);
-            for (int x = 0; x < fw; x++) {
-                int sx = Math.min(hw - 1, x * hw / fw);
-                float v = (holo[sy * hw + sx] - mn) * inv;
-                out[y * fw + x] = (byte) Math.min(255, Math.max(0, (int) v));
-            }
+        double pi = Math.PI;
+        if (imp.getBitDepth() == 32 && mn >= -pi - 1e-3 && mx <= pi + 1e-3 && mn < 0) {
+            for (int i = 0; i < out.length; i++) out[i] += (float) pi;
+        } else if (imp.getBitDepth() == 32 && mn >= -1e-3 && mx <= 2 * pi + 1e-3) {
+            // already 0–2π radians
+        } else {
+            double full = imp.getBitDepth() == 16 ? 65535.0 : 255.0;
+            for (int i = 0; i < out.length; i++) out[i] = (float) (out[i] / full * 2.0 * pi);
         }
         return out;
     }
 
-    private static void computeAndShowQpiResults(Window parent, HoloBioToolInputs in, float[] phaseForQpi,
-                                                 int zones, boolean circleRoi, boolean thicknessMode,
-                                                 double nSample, double nMedium, double thicknessUm,
-                                                 double pixelUm, double mag, RoiManager rm) {
-        int w = in.fieldWidth;
-        int h = in.fieldHeight;
-        float[] ph = phaseForQpi;
-        double lam = in.wavelengthUm;
-        double umPerPx = pixelUm / mag;
+    /**
+     * Profiles, φ_low / φ_high (means of the lowest / highest 5 %), Δφ and the chosen output for
+     * each ROI; plot and table as before. Distances use the image's scale. The numbered ROIs are
+     * left on the phase window (item 18).
+     */
+    private static void computeQpiResults(Window parent, ImagePlus target, List<Roi> rois, boolean circle,
+                                          QpiSettings s) {
+        int w = target.getWidth();
+        int h = target.getHeight();
+        float[] ph = phase0to2pi(target);
+        ij.measure.Calibration cal = target.getCalibration();
+        boolean scaled = cal.scaled();
+        double perPx = scaled ? cal.pixelWidth : 1.0;
+        String unit = scaled ? cal.getUnit() : "px";
+        int zones = rois.size();
 
         ResultsTable rt = new ResultsTable();
         // Profiles in the shared CSV layout (region,index,position_um,phase_rad) of RT DHM and
         // HoloBio Python, so File > Save As writes the same file both programs read.
         ResultsTable profRt = new ResultsTable();
         double[] dphis = new double[zones];
-        java.awt.Color[] plotColors = QPI_COLORS;
-
-        Plot plot = new Plot("Phase profiles", "Distance [\u00b5m]", "Phase [rad]");
+        Plot plot = new Plot("Phase profiles", "Distance [" + unit + "]", "Phase [rad]");
         double globMin = Double.POSITIVE_INFINITY, globMax = Double.NEGATIVE_INFINITY;
         double globXMax = 0;
         StringBuilder legend = new StringBuilder();
 
         for (int zi = 0; zi < zones; zi++) {
-            Roi roi = rm.getRoi(zi);
+            Roi roi = rois.get(zi);
             double[] prof;
-            double lenPx;
-            if (circleRoi) {
-                if (!(roi instanceof OvalRoi)) {
-                    JOptionPane.showMessageDialog(parent,
-                        "ROI #" + (zi + 1) + " must be an Oval/Circle (use the oval tool).", "HoloBio QPI",
-                        JOptionPane.WARNING_MESSAGE);
-                    return;
-                }
+            if (circle) {
                 OvalRoi ov = (OvalRoi) roi;
-                double cx = ov.getXBase() + ov.getFloatWidth()  / 2.0;
+                double cx = ov.getXBase() + ov.getFloatWidth() / 2.0;
                 double cy = ov.getYBase() + ov.getFloatHeight() / 2.0;
-                double r  = 0.25 * (ov.getFloatWidth() + ov.getFloatHeight());
-                prof = HoloBioQpiSpeckleMath.profileAlongCircle(ph, w, h, cx, cy, r);
-                lenPx = 2.0 * Math.PI * Math.max(1.0, r);
+                prof = HoloBioQpiSpeckleMath.profileAlongCircle(ph, w, h, cx, cy, ov.getFloatWidth() / 2.0);
             } else {
-                if (!(roi instanceof Line)) {
-                    JOptionPane.showMessageDialog(parent,
-                        "ROI #" + (zi + 1) + " must be a Straight Line (use the line tool).", "HoloBio QPI",
-                        JOptionPane.WARNING_MESSAGE);
-                    return;
-                }
                 Line ln = (Line) roi;
-                double x1 = ln.x1, y1 = ln.y1, x2 = ln.x2, y2 = ln.y2;
-                prof = HoloBioQpiSpeckleMath.profileAlongLine(ph, w, h, x1, y1, x2, y2);
-                lenPx = Math.hypot(x2 - x1, y2 - y1);
+                prof = HoloBioQpiSpeckleMath.profileAlongLine(ph, w, h, ln.x1d, ln.y1d, ln.x2d, ln.y2d);
             }
-
-            // phaseForQpi is already [0, 2π] (Python QPI parity) — no extra +π
             double[] st = HoloBioQpiSpeckleMath.phaseStats(prof);
             double low = st[0], high = st[1], dphi = st[2];
             dphis[zi] = dphi;
 
             // Python QPI: dist = np.arange(len(prof)) * μm_per_px
             double[] xs = new double[prof.length];
-            double stepUm = umPerPx;
             for (int k = 0; k < prof.length; k++) {
-                xs[k] = k * stepUm;
+                xs[k] = k * perPx;
                 if (prof[k] < globMin) globMin = prof[k];
                 if (prof[k] > globMax) globMax = prof[k];
             }
             if (xs.length > 0) {
                 globXMax = Math.max(globXMax, xs[xs.length - 1]);
             }
-
-            java.awt.Color zc = plotColors[zi % plotColors.length];
+            java.awt.Color zc = QPI_COLORS[zi % QPI_COLORS.length];
             plot.setColor(zc);
             plot.setLineWidth(2);
             plot.addPoints(xs, prof, Plot.LINE);
@@ -636,13 +707,6 @@ public final class HoloBioToolDialogs {
                 plot.setLineWidth(1);
                 plot.drawDottedLine(xs[0], low, xs[xs.length - 1], low, 2);
                 plot.drawDottedLine(xs[0], high, xs[xs.length - 1], high, 2);
-            }
-
-            String extra = "";
-            if (thicknessMode && !Double.isNaN(dphi)) {
-                double th = Math.abs(dphi) * lam
-                        / (2.0 * Math.PI * Math.max(1e-12, Math.abs(nSample - nMedium)));
-                extra = String.format("  t=%.3f µm", th);
             }
             // Names given by the user or a ROI file are kept; RoiManager's automatic names
             // ("0510-0550") are replaced by "Profile N", as in HoloBio Python.
@@ -657,21 +721,12 @@ public final class HoloBioToolDialogs {
             rt.addValue("φ_low (rad)", low);
             rt.addValue("φ_high (rad)", high);
             rt.addValue("Δφ (rad)", dphi);
-            if (thicknessMode) {
-                double thickness = Math.abs(dphi) * lam / (2.0 * Math.PI * Math.max(1e-12, Math.abs(nSample - nMedium)));
-                rt.addValue("Thickness (µm)", thickness);
-            } else {
-                // Δφ = 2π·t·Δn / λ  →  Δn = λ·|Δφ| / (2π·t);  n_s = n_m + Δn.
-                // (HoloBio Python reports n_rel = 2π·t / (λ·Δφ), which is 1/Δn, not an index.)
-                double dn = lam * Math.abs(dphi) / (2.0 * Math.PI * Math.max(1e-12, thicknessUm));
-                rt.addValue("\u0394n", dn);
-                rt.addValue("n_sample (n_m + \u0394n)", nMedium + dn);
-            }
+            addQpiOutputColumns(rt, Math.abs(dphi), s);
             for (int k = 0; k < prof.length; k++) {
                 profRt.incrementCounter();
                 profRt.addValue("region", "P" + (zi + 1));
                 profRt.addValue("index", k);
-                profRt.addValue("position_um", xs[k]);
+                profRt.addValue(scaled ? "position_" + ("µm".equals(unit) ? "um" : unit) : "position_px", xs[k]);
                 profRt.addValue("phase_rad", prof[k]);
             }
         }
@@ -696,13 +751,27 @@ public final class HoloBioToolDialogs {
         plot.addLegend(legend.toString());
         showPlotReplacing(plot);
 
+        drawNumberedRois(target, rois.toArray(new Roi[0]));
         rt.show("HoloBio QPI");
         profRt.show("HoloBio QPI profiles");
         lastQpiTable = rt;
         lastQpiProfiles = profRt;
-        HoloBioFijiUi.log("[HoloBio QPI] zones=" + zones + " thicknessMode=" + thicknessMode
-            + " lambda_um=" + lam + " um_per_px=" + umPerPx);
+        HoloBioFijiUi.log("[HoloBio QPI] " + target.getTitle() + ": zones=" + zones + " output=" + s.output
+            + " lambda_um=" + s.lambdaUm + " scale=" + perPx + " " + unit + "/px");
         IJ.showStatus("HoloBio: QPI results in table and phase profile plot.");
+    }
+
+    /** Thickness or index columns for |Δφ|, as chosen (nothing extra for Δφ only). */
+    private static void addQpiOutputColumns(ResultsTable rt, double absDphi, QpiSettings s) {
+        if (QPI_OUT_THICKNESS.equals(s.output)) {
+            // Δφ = 2π·t·|n_s − n_m| / λ  →  t = λ·|Δφ| / (2π·|n_s − n_m|)
+            rt.addValue("Thickness (µm)", absDphi * s.lambdaUm / (2.0 * Math.PI * Math.abs(s.nSample - s.nMedium)));
+        } else if (QPI_OUT_INDEX.equals(s.output)) {
+            // Δφ = 2π·t·Δn / λ  →  Δn = λ·|Δφ| / (2π·t);  n_s = n_m + Δn.
+            double dn = s.lambdaUm * absDphi / (2.0 * Math.PI * s.thicknessUm);
+            rt.addValue("Δn", dn);
+            rt.addValue("n_sample (n_m + Δn)", s.nMedium + dn);
+        }
     }
 
     /** Last QPI tables, for tests. */
@@ -710,101 +779,115 @@ public final class HoloBioToolDialogs {
     static ResultsTable lastQpiProfiles;
 
     /**
-     * Phase difference between two regions or two points (fix 13). The user draws two
-     * rectangles/ovals, or places two points; Δφ = φ(second) − φ(first), using the circular mean
-     * of the phase inside each region and wrapped to (−π, π].
+     * Pick ROIs directly on an open image (the phase window, or the image a speckle measurement
+     * uses): no window is opened or closed (item 20), the numbered ROIs stay on it after Done
+     * (item 18), and Cancel restores what was drawn before. A ROI still selected when Done is
+     * pressed counts even if t was not pressed for it.
      */
-    private static void runQpiPairs(Window hideDlg, HoloBioToolInputs in, String source, boolean points,
-                                    boolean thicknessMode, double nSample, double nMedium, double thicknessUm) {
-        float[] phaseForQpi = phaseForQpiPythonParity(in);
-        ByteProcessor bp = buildDisplayBp(in, source, phaseForQpi);
-        if (bp == null || phaseForQpi == null) {
-            JOptionPane.showMessageDialog(hideDlg, "No phase available. Reconstruct first.",
-                "HoloBio QPI", JOptionPane.ERROR_MESSAGE);
+    private static void runRoiPickOnImage(ImagePlus imp, String instructions, int minRoiCount,
+                                          Window hideWhilePicking, String ijTool, String roiKindLabel,
+                                          Consumer<Boolean> whenFinished) {
+        if (imp == null || imp.getWindow() == null) {
+            whenFinished.accept(false);
             return;
         }
-        String what = points ? "points" : "regions";
-        ImagePlus imp = new ImagePlus("HoloBio QPI \u2014 pick 2 " + what + " on " + source, bp);
-        String instr = points
-            ? "Click the first point, press t; click the second point, press t. Then Done."
-            : "Draw the first region (rectangle or oval), press t; draw the second, press t. Then Done.";
-        runRoiPickSession(imp, instr, 2, hideDlg, points ? "point" : "rectangle", what, ok -> {
-            if (!ok) return;
-            RoiManager rm = RoiManager.getInstance();
-            if (rm == null || rm.getCount() < 2) {
-                JOptionPane.showMessageDialog(hideDlg, "Two " + what + " are needed.",
-                    "HoloBio QPI", JOptionPane.WARNING_MESSAGE);
+        if (hideWhilePicking != null) {
+            hideWhilePicking.setVisible(false);
+        }
+        Overlay before = imp.getOverlay() != null ? imp.getOverlay().duplicate() : null;
+        imp.setOverlay(null);
+        imp.deleteRoi();
+        RoiManager rm = HoloBioFijiUi.roiManagerForPicking();
+        rm.reset();
+        ij.WindowManager.setCurrentWindow(imp.getWindow());
+        imp.getWindow().toFront();
+        IJ.setTool(ijTool != null ? ijTool : "rectangle");
+
+        JDialog helper = new JDialog((Frame) null, "HoloBio — ROI selection", false);
+        helper.setAlwaysOnTop(true);
+        helper.setLayout(new BorderLayout(HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_2));
+        JLabel lab = new JLabel("<html><body style='width:300px'>" + instructions + "</body></html>");
+        lab.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_3));
+        helper.add(lab, BorderLayout.CENTER);
+        JLabel countLabel = new JLabel("ROIs added: 0 / " + minRoiCount);
+        countLabel.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_3));
+        helper.add(countLabel, BorderLayout.NORTH);
+        JButton done = HoloBioUiStyle.primaryButton("Done");
+        JButton cancel = HoloBioUiStyle.secondaryButton("Cancel");
+        helper.add(HoloBioUiStyle.buildFooter("On \"" + imp.getTitle() + "\"", cancel, done), BorderLayout.SOUTH);
+
+        final int[] lastCount = {0};
+        javax.swing.Timer pollTimer = new javax.swing.Timer(250, ev -> {
+            RoiManager rmNow = RoiManager.getInstance();
+            int n = rmNow != null ? rmNow.getCount() : 0;
+            if (n != lastCount[0]) {
+                lastCount[0] = n;
+                countLabel.setText("ROIs added: " + n + " / " + minRoiCount);
+                showAddedRois(imp, rmNow);
+            }
+        });
+        pollTimer.start();
+
+        Runnable closePick = () -> {
+            pollTimer.stop();
+            helper.dispose();
+            HoloBioFijiUi.hideRoiManager();
+            if (hideWhilePicking != null) {
+                hideWhilePicking.setVisible(true);
+                hideWhilePicking.toFront();
+            }
+        };
+        done.addActionListener(e -> {
+            RoiManager rmDone = HoloBioFijiUi.roiManagerForPicking();
+            if (rmDone.getCount() < minRoiCount && imp.getRoi() != null) {
+                rmDone.addRoi(imp.getRoi());
+            }
+            if (rmDone.getCount() < minRoiCount) {
+                String kind = roiKindLabel != null ? roiKindLabel : "ROI";
+                JOptionPane.showMessageDialog(helper,
+                    "Add at least " + minRoiCount + " " + kind + "(s) on the image (press \"t\" after each), then Done.",
+                    "HoloBio", JOptionPane.WARNING_MESSAGE);
                 return;
             }
-            showDeltaPhiTable(in, phaseForQpi, rm.getRoi(0), rm.getRoi(1), thicknessMode,
-                nSample, nMedium, thicknessUm);
+            imp.deleteRoi();
+            closePick.run();
+            whenFinished.accept(true);
         });
+        cancel.addActionListener(e -> {
+            imp.deleteRoi();
+            imp.setOverlay(before);
+            closePick.run();
+            whenFinished.accept(false);
+        });
+        cancelOnClose(helper, cancel);
+        helper.pack();
+        Window iw = imp.getWindow();
+        helper.setLocation(iw.getX() + 20, iw.getY() + iw.getHeight() - helper.getHeight() - 20);
+        helper.setVisible(true);
+        IJ.showStatus("HoloBio: draw on \"" + imp.getTitle() + "\", then click Done in the helper.");
     }
 
-    static ResultsTable showDeltaPhiTable(HoloBioToolInputs in, float[] phase, Roi first, Roi second,
-                                          boolean thicknessMode, double nSample, double nMedium, double thicknessUm) {
-        double[] d = deltaPhiBetween(phase, in.fieldWidth, in.fieldHeight, first, second);
-        double lam = in.wavelengthUm;
-        ResultsTable rt = new ResultsTable();
-        rt.incrementCounter();
-        rt.addValue("\u03c6_1 (rad)", d[0]);
-        rt.addValue("\u03c6_2 (rad)", d[1]);
-        rt.addValue("\u0394\u03c6 = \u03c6_2 \u2212 \u03c6_1 (rad)", d[2]);
-        rt.addValue("pixels_1", d[3]);
-        rt.addValue("pixels_2", d[4]);
-        if (thicknessMode) {
-            rt.addValue("Thickness (\u00b5m)", Math.abs(d[2]) * lam
-                / (2.0 * Math.PI * Math.max(1e-12, Math.abs(nSample - nMedium))));
-        } else {
-            double dn = lam * Math.abs(d[2]) / (2.0 * Math.PI * Math.max(1e-12, thicknessUm));
-            rt.addValue("\u0394n", dn);
-            rt.addValue("n_sample (n_m + \u0394n)", nMedium + dn);
+    /** ROIs left on {@code imp}, numbered and in their profile colours. */
+    static void drawNumberedRois(ImagePlus imp, Roi[] rois) {
+        if (imp == null) {
+            return;
         }
-        rt.show("HoloBio QPI \u0394\u03c6");
-        lastQpiTable = rt;
-        IJ.showStatus(String.format("HoloBio QPI: \u0394\u03c6 = %.4f rad", d[2]));
-        return rt;
-    }
-
-    /**
-     * {φ1, φ2, Δφ, n1, n2}: circular mean of the phase inside each ROI (a point ROI samples its
-     * pixel), and Δφ = φ2 − φ1 wrapped to (−π, π].
-     */
-    static double[] deltaPhiBetween(float[] phase, int w, int h, Roi a, Roi b) {
-        double[] ma = circularMeanIn(phase, w, h, a);
-        double[] mb = circularMeanIn(phase, w, h, b);
-        double dphi = Math.atan2(Math.sin(mb[0] - ma[0]), Math.cos(mb[0] - ma[0]));
-        return new double[] {ma[0], mb[0], dphi, ma[1], mb[1]};
-    }
-
-    private static double[] circularMeanIn(float[] phase, int w, int h, Roi roi) {
-        double s = 0, c = 0;
-        int n = 0;
-        if (roi.getType() == Roi.POINT) {
-            java.awt.Polygon pts = roi.getPolygon();
-            for (int i = 0; i < pts.npoints; i++) {
-                int x = Math.max(0, Math.min(w - 1, pts.xpoints[i]));
-                int y = Math.max(0, Math.min(h - 1, pts.ypoints[i]));
-                double v = phase[y * w + x];
-                s += Math.sin(v);
-                c += Math.cos(v);
-                n++;
-            }
-        } else {
-            Rectangle r = roi.getBounds();
-            for (int y = Math.max(0, r.y); y < Math.min(h, r.y + r.height); y++) {
-                for (int x = Math.max(0, r.x); x < Math.min(w, r.x + r.width); x++) {
-                    if (!roi.contains(x, y)) continue;
-                    double v = phase[y * w + x];
-                    s += Math.sin(v);
-                    c += Math.cos(v);
-                    n++;
-                }
-            }
+        Overlay ov = new Overlay();
+        int fontPx = Math.max(18, Math.max(imp.getWidth(), imp.getHeight()) / 45);
+        for (int i = 0; i < rois.length; i++) {
+            Roi r = (Roi) rois[i].clone();
+            java.awt.Color c = QPI_COLORS[i % QPI_COLORS.length];
+            r.setStrokeColor(c);
+            r.setStrokeWidth(Math.max(2, fontPx / 8));
+            ov.add(r);
+            java.awt.Rectangle b = r.getBounds();
+            TextRoi label = new TextRoi(String.valueOf(i + 1), b.x + b.width + 4, b.y - fontPx,
+                new java.awt.Font("SansSerif", java.awt.Font.BOLD, fontPx));
+            label.setStrokeColor(c);
+            label.setAntiAlias(true);
+            ov.add(label);
         }
-        double mean = n > 0 ? Math.atan2(s / n, c / n) : Double.NaN;
-        if (mean < 0) mean += 2.0 * Math.PI;       // same [0, 2π) range as the QPI phase
-        return new double[] {mean, n};
+        imp.setOverlay(ov);
     }
 
     private static void addWest(JPanel parent, Component child, GridBagConstraints c) {
@@ -833,7 +916,11 @@ public final class HoloBioToolDialogs {
         tab.add(Box.createVerticalStrut(6));
     }
 
-    /** Speckle dialog — compact filter / compare / measure tabs. */
+    /**
+     * Speckle dialog: Filter, then Measure &amp; Compare (items 7–12). Zones are drawn once on the
+     * channel image and every output (contrast table, speckle plot, line profile) uses them, one
+     * after the other; side by side shows the whole image. Iterations = 0 restores the original.
+     */
     public static void showSpeckleDialog(Frame owner, HoloBioToolInputs inputs, HoloBioToolCallbacks callbacks) {
         if (speckleWindow != null && speckleWindow.isDisplayable()) {
             speckleWindow.dispose();         // reopening rebuilds it with the current field
@@ -850,7 +937,7 @@ public final class HoloBioToolDialogs {
         JLabel dlgTitle = HoloBioUiStyle.mainTitle("Speckle");
         dlgTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
         header.add(dlgTitle);
-        JLabel dlgSteps = HoloBioUiStyle.workflowSteps("Filter  →  Compare  →  Measure");
+        JLabel dlgSteps = HoloBioUiStyle.workflowSteps("Filter  →  Measure & Compare");
         dlgSteps.setAlignmentX(Component.LEFT_ALIGNMENT);
         header.add(dlgSteps);
         JLabel statusLabel = HoloBioUiStyle.statusHtml(" ");
@@ -888,9 +975,10 @@ public final class HoloBioToolDialogs {
         JPanel iterRow = flowLeft();
         JTextField tfIterations = new JTextField(String.valueOf(HoloBioSpeckleDefaults.FILTER_ITERATIONS), 4);
         HoloBioUiStyle.styleField(tfIterations);
-        tfIterations.setToolTipText("Integer ≥ 1.");
+        tfIterations.setToolTipText("Integer ≥ 0. 0 = back to the original (unfiltered) image.");
         iterRow.add(HoloBioUiStyle.fieldLabel("Iterations"));
         iterRow.add(tfIterations);
+        iterRow.add(HoloBioUiStyle.helperText("0 = original"));
         tabFilter.add(iterRow);
 
         JButton applyFilt = HoloBioUiStyle.primaryButton("Apply filter");
@@ -900,29 +988,12 @@ public final class HoloBioToolDialogs {
         tabFilter.add(filtBtnRow);
         tabs.addTab("Filter", tabFilter);
 
-        // —— Compare ——
-        JPanel tabCompare = compactTabPanel();
-        addTabSectionTitle(tabCompare, "Comparison");
-        JCheckBox ckSide = new JCheckBox("Side by side", true);
-        JCheckBox ckPlot = new JCheckBox("Speckle plot", false);
-        JCheckBox ckProf = new JCheckBox("Line profile", false);
-        tabCompare.add(ckSide);
-        tabCompare.add(ckPlot);
-        tabCompare.add(ckProf);
-        JButton applyCmp = HoloBioUiStyle.primaryButton("Apply");
-        applyCmp.setEnabled(false);
-        JPanel cmpBtnRow = flowLeft();
-        cmpBtnRow.add(applyCmp);
-        tabCompare.add(Box.createVerticalStrut(HoloBioUiStyle.SPACE_2));
-        tabCompare.add(cmpBtnRow);
-        tabs.addTab("Compare", tabCompare);
-
-        // —— Measure (on Filter-tab channel, after Apply filter) ——
+        // —— Measure & Compare (item 12) ——
         JPanel tabMeasure = compactTabPanel();
-        addTabSectionTitle(tabMeasure, "Contrast measure");
+        addTabSectionTitle(tabMeasure, "Zones");
         JLabel measureHint = HoloBioUiStyle.hintHtml(
-            "Uses the <b>filtered</b> image from the Filter tab (Amplitude or Phase), not the raw reconstruction.",
-            280);
+            "Draw the zones once on the channel image; each is split into Rows × Cols cells. "
+                + "The outputs below all use these zones.", 280);
         measureHint.setAlignmentX(Component.LEFT_ALIGNMENT);
         tabMeasure.add(measureHint);
         tabMeasure.add(Box.createVerticalStrut(HoloBioUiStyle.SPACE_2));
@@ -943,123 +1014,190 @@ public final class HoloBioToolDialogs {
         grid.add(tfZones);
         grid.add(tfRows);
         grid.add(tfCols);
+        grid.setAlignmentX(Component.LEFT_ALIGNMENT);
         tabMeasure.add(grid);
-
-        JButton applyMeas = HoloBioUiStyle.primaryButton("Apply");
-        applyMeas.setEnabled(false);
+        tabMeasure.add(Box.createVerticalStrut(HoloBioUiStyle.SPACE_2));
+        addTabSectionTitle(tabMeasure, "Outputs");
+        JCheckBox ckTable = new JCheckBox("Contrast table (each cell)", true);
+        JCheckBox ckPlot = new JCheckBox("Speckle plot (contrast per iteration, each zone)", false);
+        JCheckBox ckProf = new JCheckBox("Line profile (each zone)", false);
+        JCheckBox ckSide = new JCheckBox("Side by side (whole image)", false);
+        for (JCheckBox ck : new JCheckBox[] {ckTable, ckPlot, ckProf, ckSide}) {
+            ck.setAlignmentX(Component.LEFT_ALIGNMENT);
+            tabMeasure.add(ck);
+        }
+        JButton applyMeas = HoloBioUiStyle.primaryButton("Draw zones & run");
         JPanel measBtnRow = flowLeft();
         measBtnRow.add(applyMeas);
         tabMeasure.add(Box.createVerticalStrut(HoloBioUiStyle.SPACE_2));
         tabMeasure.add(measBtnRow);
-        tabs.addTab("Measure", tabMeasure);
+        tabs.addTab("Measure & Compare", tabMeasure);
+
+        // Inputs and state of the reconstruction clicked last, read when a button is pressed.
+        java.util.function.Supplier<HoloBioToolInputs> inputsNow = () -> {
+            HoloBioToolInputs now = callbacks != null ? callbacks.currentInputs() : null;
+            return now != null ? now : inputs;
+        };
 
         Runnable refreshStatus = () -> {
             boolean ampCh = filtAmp.isSelected();
             HoloBioSpeckleState st = callbacks != null ? callbacks.getSpeckleState() : null;
-            boolean filtered = st != null && st.hasFiltered(ampCh);
-            applyCmp.setEnabled(filtered);
-            applyMeas.setEnabled(filtered);
-            if (inputs == null || !inputs.hasAmplitudeDisplay0255()) {
+            String desc = st != null && st.hasFiltered(ampCh) ? st.getFilterDescription(ampCh) : null;
+            String ch = ampCh ? "amplitude" : "phase";
+            if (inputs == null && (callbacks == null || callbacks.currentInputs() == null)) {
                 statusLabel.setText("<html>Reconstruct first, then apply a filter.</html>");
-            } else if (filtered) {
-                statusLabel.setText("<html>Filter applied — open <b>Compare</b> or <b>Measure</b>.</html>");
+            } else if (desc != null) {
+                statusLabel.setText("<html>Filtered " + ch + ": <b>" + desc + "</b>. Open <b>Measure &amp; Compare</b>.</html>");
             } else {
-                statusLabel.setText("<html>Ready — start on <b>Filter</b>.</html>");
+                statusLabel.setText("<html>" + ch.substring(0, 1).toUpperCase() + ch.substring(1)
+                    + " not filtered: measure it as it is, or start on <b>Filter</b>.</html>");
             }
         };
-
         filtAmp.addActionListener(e -> refreshStatus.run());
         filtPhs.addActionListener(e -> refreshStatus.run());
+        dlg.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowActivated(java.awt.event.WindowEvent e) {
+                refreshStatus.run();
+            }
+        });
 
         applyFilt.addActionListener(e -> {
-            if (callbacks == null || inputs == null) {
+            HoloBioToolInputs in = inputsNow.get();
+            if (callbacks == null || in == null) {
                 JOptionPane.showMessageDialog(dlg, "No reconstruction data.", "HoloBio Speckle",
                     JOptionPane.WARNING_MESSAGE);
                 return;
             }
             boolean ampCh = filtAmp.isSelected();
-            if (ampCh && !inputs.hasAmplitudeDisplay0255()) {
-                JOptionPane.showMessageDialog(dlg, "Reconstruct first (amplitude).", "HoloBio Speckle",
-                    JOptionPane.INFORMATION_MESSAGE);
+            if (ampCh ? !in.hasAmplitudeField() : !in.hasPhaseField()) {
+                JOptionPane.showMessageDialog(dlg, "Reconstruct first (" + (ampCh ? "amplitude" : "phase") + ").",
+                    "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
-            if (!ampCh && !inputs.hasPhaseDisplay0255()) {
-                JOptionPane.showMessageDialog(dlg, "Reconstruct first (phase).", "HoloBio Speckle",
-                    JOptionPane.INFORMATION_MESSAGE);
+            int p;
+            try {
+                p = Integer.parseInt(tfIterations.getText().trim());
+            } catch (NumberFormatException ex) {
+                p = -1;
+            }
+            if (p < 0) {
+                JOptionPane.showMessageDialog(dlg, "Iterations must be an integer ≥ 0 (0 = original image).",
+                    "HoloBio Speckle", JOptionPane.WARNING_MESSAGE);
                 return;
             }
-            int active = rbSpp.isSelected() ? 1 : 0;
-            if (active == 1 && !inputs.hasComplexField()) {
+            if (p == 0) {
+                restoreSpeckleOriginal(callbacks, in, ampCh);
+                refreshStatus.run();
+                return;
+            }
+            boolean spp = rbSpp.isSelected();
+            if (spp && !in.hasComplexField()) {
                 JOptionPane.showMessageDialog(dlg, "SPP needs a complex field — reconstruct first.",
                     "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
-            try {
-                int p = Integer.parseInt(tfIterations.getText().trim());
-                if (p < 1) {
-                    throw new NumberFormatException();
-                }
-                final int activeF = active;
-                final int pF = p;
-                final boolean ampChF = ampCh;
-                SwingUtilities.invokeLater(() -> {
-                    applySpeckleFilter(owner, inputs, callbacks, ampChF, activeF, pF);
+            final HoloBioSpeckleState st = callbacks.getSpeckleState();
+            final int pF = p;
+            final SpeckleFilterRun[] run = new SpeckleFilterRun[1];
+            // Filtering runs off the event thread so the button shows Working… and Fiji's
+            // progress bar moves (item 8); the result is applied back on the event thread.
+            HoloBioUiStyle.runBusyInBackground(applyFilt, "Working…",
+                () -> run[0] = computeSpeckleFilter(in, st, ampCh, spp, pF),
+                () -> {
+                    if (run[0] != null) {
+                        applySpeckleFilterRun(callbacks, st, run[0]);
+                    }
                     refreshStatus.run();
                     tabs.setSelectedIndex(1);
                 });
-            } catch (NumberFormatException ex) {
-                JOptionPane.showMessageDialog(dlg, "Iterations must be an integer ≥ 1.", "HoloBio Speckle",
-                    JOptionPane.WARNING_MESSAGE);
-            }
-        });
-
-        applyCmp.addActionListener(e -> {
-            if (callbacks == null || inputs == null) {
-                return;
-            }
-            boolean ampCh = filtAmp.isSelected();
-            boolean side = ckSide.isSelected();
-            boolean plot = ckPlot.isSelected();
-            boolean prof = ckProf.isSelected();
-            if (!side && !plot && !prof) {
-                JOptionPane.showMessageDialog(dlg, "Select at least one option.", "HoloBio Speckle",
-                    JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-            SwingUtilities.invokeLater(() -> runSpeckleComparison(dlg, inputs, callbacks, ampCh, side, plot, false, prof));
         });
 
         applyMeas.addActionListener(e -> {
-            if (callbacks == null) {
+            HoloBioToolInputs in = inputsNow.get();
+            if (callbacks == null || in == null) {
                 return;
             }
             boolean ampCh = filtAmp.isSelected();
             HoloBioSpeckleState st = callbacks.getSpeckleState();
-            if (st == null || !st.hasFiltered(ampCh)) {
-                JOptionPane.showMessageDialog(dlg,
-                    "Apply a speckle filter on the Filter tab first (same Amplitude/Phase channel).",
-                    "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
+            int z, r, c;
             try {
-                int z = Integer.parseInt(tfZones.getText().trim());
-                int r = Integer.parseInt(tfRows.getText().trim());
-                int c = Integer.parseInt(tfCols.getText().trim());
-                if (z < 1 || r < 1 || c < 1) {
-                    throw new NumberFormatException();
-                }
-                final boolean ampChF = ampCh;
-                SwingUtilities.invokeLater(() -> runSpeckleMeasurements(dlg, callbacks, ampChF, z, r, c));
+                z = Integer.parseInt(tfZones.getText().trim());
+                r = Integer.parseInt(tfRows.getText().trim());
+                c = Integer.parseInt(tfCols.getText().trim());
             } catch (NumberFormatException ex) {
+                z = r = c = 0;
+            }
+            if (z < 1 || r < 1 || c < 1) {
                 JOptionPane.showMessageDialog(dlg, "Zones, Rows, Cols must be integers ≥ 1.", "HoloBio Speckle",
                     JOptionPane.WARNING_MESSAGE);
+                return;
             }
+            boolean table = ckTable.isSelected();
+            boolean plot = ckPlot.isSelected();
+            boolean prof = ckProf.isSelected();
+            boolean side = ckSide.isSelected();
+            if (!table && !plot && !prof && !side) {
+                JOptionPane.showMessageDialog(dlg, "Select at least one output.", "HoloBio Speckle",
+                    JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            boolean filtered = st != null && st.hasFiltered(ampCh);
+            if ((plot || prof || side) && !filtered) {
+                JOptionPane.showMessageDialog(dlg, "Speckle plot, line profile and side by side compare the "
+                    + "original with the filtered image: apply a filter on the Filter tab first.\n"
+                    + "The contrast table works without one.", "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
+                if (!table) {
+                    return;
+                }
+                plot = prof = side = false;
+            }
+            if (plot && !st.hasIterations()) {
+                plot = false;
+            }
+            int w = in.fieldWidth;
+            int h = in.fieldHeight;
+            float[] original = st != null && st.getOriginal(ampCh) != null ? st.getOriginal(ampCh)
+                : HoloBioToolInputs.speckleChannelBase0255(in, ampCh);
+            float[] measured = filtered ? st.getFiltered(ampCh) : original;
+            if (measured == null || measured.length != w * h) {
+                JOptionPane.showMessageDialog(dlg, "No " + (ampCh ? "amplitude" : "phase") + " image of the "
+                    + "current reconstruction; reconstruct (and filter) again.", "HoloBio Speckle",
+                    JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            String desc = filtered ? st.getFilterDescription(ampCh) : null;
+            if (side && !table && !plot && !prof) {
+                showSideBySide(original, measured, w, h, desc);
+                return;
+            }
+            ImagePlus onto = callbacks.outputImage(ampCh);
+            if (onto != null && (onto.getWidth() != w || onto.getHeight() != h)) {
+                onto = null;            // e.g. the cropped DLHM Kreuzer display: use a picking window
+            }
+            final boolean tableF = table, plotF = plot, profF = prof, sideF = side;
+            final float[] originalF = original;
+            String title = (filtered ? "Speckle — Filtered " : "Speckle — ") + (ampCh ? "amplitude" : "phase");
+            runSpeckleZonePicker(dlg, measured, w, h, onto, title, z, r, c, (zoneRects, cells) -> {
+                if (tableF) {
+                    showSpeckleContrastTable(cells);
+                }
+                if (plotF) {
+                    showSpeckleContrastPlot(st, zoneRects);
+                }
+                if (profF) {
+                    showLineProfiles(originalF, measured, w, zoneRects, desc);
+                }
+                if (sideF) {
+                    showSideBySide(originalF, measured, w, h, desc);
+                }
+            });
         });
 
         JButton close = HoloBioUiStyle.tertiaryButton("Close");
         close.addActionListener(e -> dlg.dispose());
         JPanel bottom = HoloBioUiStyle.buildFooter(
-            "Filter first, then Compare or Measure.", close);
+            "Filter first, then Measure & Compare.", close);
 
         dlg.add(header, BorderLayout.NORTH);
         dlg.add(tabs, BorderLayout.CENTER);
@@ -1068,86 +1206,130 @@ public final class HoloBioToolDialogs {
         dlg.pack();
         HoloBioUiStyle.polish(dlg);
         Dimension d = dlg.getSize();
-        int w = Math.min(380, Math.max(320, d.width));
-        int h = Math.min(400, Math.max(320, d.height));
+        int w = Math.min(420, Math.max(340, d.width));
+        int h = Math.min(480, Math.max(340, d.height));
         dlg.setSize(w, h);
-        dlg.setMinimumSize(new Dimension(280, 300));
+        dlg.setMinimumSize(new Dimension(300, 320));
         dlg.setLocationRelativeTo(owner);
         dlg.setVisible(true);
     }
 
-    private static void applySpeckleFilter(Frame owner, HoloBioToolInputs in, HoloBioToolCallbacks cb,
-                                           boolean amplitudeChannel, int method, int iterations) {
-        HoloBioSpeckleState st = cb.getSpeckleState();
-        if (st != null) {
-            st.clearIterations();
-        }
-        int w = in.fieldWidth;
-        int h = in.fieldHeight;
-        if (st != null) {
-            st.setFieldSize(w, h);
-        }
+    /** A speckle filter computed off the event thread, applied on it. */
+    private static final class SpeckleFilterRun {
+        boolean amplitude;
+        boolean spp;
+        int iterations;
+        int w, h;
+        float[] originalBase;
+        float[] fieldRe, fieldIm;           // SPP input field (the original)
+        List<float[]> hmfIterations;
+        HoloBioQpiSpeckleMath.SppIterations sppIterations;
+        float[] display;
+    }
 
-        if (method == 1) {
-            float[] re;
-            float[] im;
-            if (st != null && st.getOriginalFieldRe() != null && st.getOriginalFieldIm() != null) {
-                re = st.getOriginalFieldRe().clone();
-                im = st.getOriginalFieldIm().clone();
-            } else {
-                re = in.fieldRe.clone();
-                im = in.fieldIm.clone();
-                if (st != null) {
-                    st.setOriginalField(re, im);
-                }
-            }
-            HoloBioQpiSpeckleMath.SppIterations spp =
-                HoloBioQpiSpeckleMath.sppFilter(re, im, w, h, iterations);
-            int last = spp.rePerIteration.size() - 1;
-            float[] fre = spp.rePerIteration.get(last);
-            float[] fim = spp.imPerIteration.get(last);
-            float[] origBase = HoloBioToolInputs.speckleChannelBase0255(in, amplitudeChannel);
-            if (st != null) {
-                if (amplitudeChannel) {
-                    st.ensureOriginalAmplitude(origBase);
-                } else {
-                    st.ensureOriginalPhase(origBase);
-                }
-                st.setSppIterations(spp.rePerIteration, spp.imPerIteration);
-            }
-            float[] display = amplitudeChannel
+    /**
+     * HMF on the unfiltered channel image, or SPP on the unfiltered complex field (both as
+     * HoloBio Python). Runs off the event thread and only reads {@code st}.
+     */
+    private static SpeckleFilterRun computeSpeckleFilter(HoloBioToolInputs in, HoloBioSpeckleState st,
+                                                         boolean amplitude, boolean spp, int iterations) {
+        SpeckleFilterRun r = new SpeckleFilterRun();
+        r.amplitude = amplitude;
+        r.spp = spp;
+        r.iterations = iterations;
+        r.w = in.fieldWidth;
+        r.h = in.fieldHeight;
+        r.originalBase = HoloBioToolInputs.speckleChannelBase0255(in, amplitude);
+        String name = spp ? "SPP" : "HMF";
+        java.util.function.IntConsumer progress = it -> {
+            IJ.showStatus("HoloBio: " + name + " iteration " + it + "/" + iterations + "…");
+            IJ.showProgress(it, iterations);
+        };
+        IJ.showStatus("HoloBio: " + name + " filtering…");
+        if (spp) {
+            boolean haveOriginal = st != null && st.getOriginalFieldRe() != null
+                && st.getOriginalFieldRe().length == r.w * r.h;
+            r.fieldRe = haveOriginal ? st.getOriginalFieldRe().clone() : in.fieldRe.clone();
+            r.fieldIm = haveOriginal ? st.getOriginalFieldIm().clone() : in.fieldIm.clone();
+            r.sppIterations = HoloBioQpiSpeckleMath.sppFilter(r.fieldRe, r.fieldIm, r.w, r.h, iterations, progress);
+            int last = r.sppIterations.rePerIteration.size() - 1;
+            float[] fre = r.sppIterations.rePerIteration.get(last);
+            float[] fim = r.sppIterations.imPerIteration.get(last);
+            r.display = amplitude
                 ? HoloBioQpiSpeckleMath.complexToAmplitudeMinMax0255(fre, fim)
                 : HoloBioQpiSpeckleMath.complexToPhaseMinMax0255(fre, fim);
-            FloatProcessor fp = HoloBioQpiSpeckleMath.toFloatProcessor0255(display, w, h);
-            cb.onSpeckleSppResult(fre, fim, w, h, amplitudeChannel, fp);
-            HoloBioFijiUi.log("[HoloBio Speckle filter] SPP iterations=" + iterations + " channel="
-                + (amplitudeChannel ? "amplitude" : "phase"));
         } else {
-            float[] base = HoloBioToolInputs.speckleChannelBase0255(in, amplitudeChannel);
-            if (base == null) {
-                JOptionPane.showMessageDialog(owner, "No reconstruction for speckle filter.",
-                    "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
-                return;
+            if (r.originalBase == null) {
+                return null;
             }
-            base = base.clone();
-            if (st != null) {
-                if (amplitudeChannel) {
-                    st.ensureOriginalAmplitude(base);
-                } else {
-                    st.ensureOriginalPhase(base);
-                }
-            }
-            List<float[]> iters = HoloBioQpiSpeckleMath.hybridMedianMeanIterations(base, w, h, iterations);
-            float[] out = iters.get(iters.size() - 1);
-            if (st != null) {
-                st.setHmfIterations(iters, amplitudeChannel);
-            }
-            FloatProcessor fp = HoloBioQpiSpeckleMath.toFloatProcessor0255(out, w, h);
-            cb.onSpeckleFilterResult(amplitudeChannel, fp);
-            HoloBioFijiUi.log("[HoloBio Speckle filter] HMF iterations=" + iterations + " channel="
-                + (amplitudeChannel ? "amplitude" : "phase"));
+            r.hmfIterations = HoloBioQpiSpeckleMath.hybridMedianMeanIterations(
+                r.originalBase.clone(), r.w, r.h, iterations, progress);
+            r.display = r.hmfIterations.get(r.hmfIterations.size() - 1);
         }
+        IJ.showProgress(1.0);
+        return r;
+    }
+
+    private static void applySpeckleFilterRun(HoloBioToolCallbacks cb, HoloBioSpeckleState st, SpeckleFilterRun r) {
+        if (st != null) {
+            st.clearIterations();
+            st.setFieldSize(r.w, r.h);
+            if (r.amplitude) {
+                st.ensureOriginalAmplitude(r.originalBase);
+            } else {
+                st.ensureOriginalPhase(r.originalBase);
+            }
+        }
+        FloatProcessor fp = HoloBioQpiSpeckleMath.toFloatProcessor0255(r.display, r.w, r.h);
+        if (r.spp) {
+            if (st != null) {
+                if (st.getOriginalFieldRe() == null) {
+                    st.setOriginalField(r.fieldRe, r.fieldIm);
+                }
+                st.setSppIterations(r.sppIterations.rePerIteration, r.sppIterations.imPerIteration);
+            }
+            int last = r.sppIterations.rePerIteration.size() - 1;
+            cb.onSpeckleSppResult(r.sppIterations.rePerIteration.get(last), r.sppIterations.imPerIteration.get(last),
+                r.w, r.h, r.amplitude, fp);
+        } else {
+            if (st != null) {
+                st.setHmfIterations(r.hmfIterations, r.amplitude);
+            }
+            cb.onSpeckleFilterResult(r.amplitude, fp);
+        }
+        if (st != null) {
+            st.setFilterDescription(r.amplitude,
+                (r.spp ? "SPP" : "HMF") + ", " + r.iterations + " iteration" + (r.iterations == 1 ? "" : "s"));
+        }
+        HoloBioFijiUi.log("[HoloBio Speckle filter] " + (r.spp ? "SPP" : "HMF") + " iterations=" + r.iterations
+            + " channel=" + (r.amplitude ? "amplitude" : "phase"));
         IJ.showStatus("HoloBio: speckle filter applied.");
+    }
+
+    /** Iterations = 0: show the unfiltered reconstruction again and forget the filter (item 7). */
+    private static void restoreSpeckleOriginal(HoloBioToolCallbacks cb, HoloBioToolInputs in, boolean amplitude) {
+        HoloBioSpeckleState st = cb.getSpeckleState();
+        int w = in.fieldWidth;
+        int h = in.fieldHeight;
+        float[] re = st != null ? st.getOriginalFieldRe() : null;
+        float[] im = st != null ? st.getOriginalFieldIm() : null;
+        if (re != null && im != null && re.length == w * h) {
+            float[] disp = amplitude
+                ? HoloBioQpiSpeckleMath.complexToAmplitudeMinMax0255(re, im)
+                : HoloBioQpiSpeckleMath.complexToPhaseMinMax0255(re, im);
+            cb.onSpeckleSppResult(re.clone(), im.clone(), w, h, amplitude,
+                HoloBioQpiSpeckleMath.toFloatProcessor0255(disp, w, h));
+        } else {
+            float[] orig = st != null && st.getOriginal(amplitude) != null ? st.getOriginal(amplitude)
+                : HoloBioToolInputs.speckleChannelBase0255(in, amplitude);
+            if (orig != null) {
+                cb.onSpeckleFilterResult(amplitude, HoloBioQpiSpeckleMath.toFloatProcessor0255(orig, w, h));
+            }
+        }
+        if (st != null) {
+            st.clearFiltered();
+        }
+        IJ.showStatus("HoloBio: original (unfiltered) image restored.");
     }
 
     private static ImagePlus bytePickImage(float[] display0255, int w, int h, String title) {
@@ -1369,70 +1551,19 @@ public final class HoloBioToolDialogs {
         IJ.showStatus("HoloBio: draw on the image, then click Done.");
     }
 
-    private static void runSpeckleComparison(Window hideDlg, HoloBioToolInputs in, HoloBioToolCallbacks cb,
-                                             boolean amplitudeChannel, boolean sideBySide,
-                                             boolean specklePlot, boolean repickPlotRegion, boolean profile) {
-        HoloBioSpeckleState st = cb.getSpeckleState();
-        float[] original = st.getOriginal(amplitudeChannel);
-        float[] filtered = st.getFiltered(amplitudeChannel);
-        if (original == null && in != null) {
-            original = HoloBioToolInputs.speckleChannelBase0255(in, amplitudeChannel);
-        }
-        if (original == null || filtered == null) {
-            JOptionPane.showMessageDialog(hideDlg, "Missing original or filtered image for comparison.",
-                "HoloBio Speckle", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        int w = in.fieldWidth;
-        int h = in.fieldHeight;
-
-        if (sideBySide) {
-            showSideBySide(original, filtered, w, h);
-        }
-        if (profile) {
-            pickRegionAndShowProfile(hideDlg, original, filtered, w, h);
-        }
-        if (specklePlot) {
-            if (!st.hasIterations()) {
-                JOptionPane.showMessageDialog(hideDlg,
-                    "No iteration data. Apply HMF or SPP first.", "HoloBio Speckle",
-                    JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
-            pickRegionForSpecklePlot(hideDlg, in, st, w, h, amplitudeChannel, repickPlotRegion);
-        }
-    }
-
     /**
-     * Fix 12: both images are normalised to [0, 1] (each by its own min and max) before they are
-     * placed side by side, so a filter that only changes the grey range does not look like an
-     * improvement, and their speckle contrast C = std(I)/mean(I) with I = (normalised value)^2
-     * (HoloBio Python {@code calc_speckle_contrast}) is reported for both.
+     * Both images normalised to [0, 1] (each by its own min and max) and placed side by side, so
+     * a filter that only changes the grey range does not look like an improvement (fix 12). The
+     * filtered panel says how it was filtered; there is no contrast table any more (item 9).
      */
-    private static void showSideBySide(float[] original, float[] filtered, int w, int h) {
+    private static void showSideBySide(float[] original, float[] filtered, int w, int h, String filterDesc) {
         float[] o = normalized01(original);
         float[] f = normalized01(filtered);
-        // Laid out as HoloBio Python's figure: suptitle "Speckle Filter Result", panels "Original" |
-        // "Filtered" in grey, no axes. Each panel is normalised to [0, 1] (shown as 0-255).
+        String filteredTitle = filterDesc != null ? "Filtered (" + filterDesc + ")" : "Filtered";
         ImagePlus imp = new ImagePlus("Speckle Filter Result", sideBySideFigure(o, f, w, h,
-            "Speckle Filter Result", "Original", "Filtered"));
-        HoloBioFijiUi.showImagePlus(imp);
-        lastSideBySide = imp;
-        double cO = speckleContrastNormalized(o);
-        double cF = speckleContrastNormalized(f);
-        ResultsTable rt = new ResultsTable();
-        rt.incrementCounter();
-        rt.addLabel("Original");
-        rt.addValue("Speckle contrast C", cO);
-        rt.incrementCounter();
-        rt.addLabel("Filtered");
-        rt.addValue("Speckle contrast C", cF);
-        rt.incrementCounter();
-        rt.addLabel("Reduction (%)");
-        rt.addValue("Speckle contrast C", cO > 0 ? 100.0 * (cO - cF) / cO : Double.NaN);
-        rt.show("HoloBio Speckle Comparison");
-        lastSpeckleComparison = new double[] {cO, cF};
-        HoloBioFijiUi.log(String.format("[HoloBio Speckle] Side-by-side (normalised): C original=%.4f, filtered=%.4f", cO, cF));
+            "Speckle Filter Result", "Original", filteredTitle));
+        lastSideBySide = HoloBioFijiUi.showReusing(imp);
+        lastSpeckleComparison = new double[] {speckleContrastNormalized(o), speckleContrastNormalized(f)};
     }
 
     /** Last side-by-side figure; for tests. */
@@ -1510,129 +1641,57 @@ public final class HoloBioToolDialogs {
         return Math.sqrt(acc / v.length) / (mean + 1e-9);
     }
 
-    private static void pickRegionForSpecklePlot(Window hideDlg, HoloBioToolInputs in,
-                                                 HoloBioSpeckleState st, int w, int h,
-                                                 boolean amplitudeChannel, boolean forceRepick) {
-        if (!forceRepick && st.hasPlotRegion()) {
-            showSpeckleContrastPlot(st);
-            return;
-        }
-        float[] pick = st.getOriginal(amplitudeChannel);
-        if (pick == null) {
-            pick = HoloBioToolInputs.speckleChannelBase0255(in, amplitudeChannel);
-        }
-        if (pick == null) {
-            JOptionPane.showMessageDialog(hideDlg,
-                "No " + (amplitudeChannel ? "amplitude" : "phase") + " image for plot region.",
-                "HoloBio Speckle", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        runSpecklePlotRegionPick(hideDlg, st, pick, w, h);
-    }
-
     /**
-     * Python {@code select_speckle_region} + {@code compare_speckle_plot_var}: one rectangle on the image.
+     * Normalised speckle contrast per iteration, one curve per zone (Python
+     * {@code compare_speckle_plot_var} on each zone). Table columns speckle_contrast and
+     * speckle_contrast_norm (item 10). HMF iteration 0 is the unfiltered image.
      */
-    private static void runSpecklePlotRegionPick(Window hideDlg, HoloBioSpeckleState st,
-                                               float[] display0255, int w, int h) {
-        if (hideDlg != null) {
-            hideDlg.setVisible(false);
-        }
-        ImagePlus imp = bytePickImage(display0255, w, h,
-            "Speckle plot — draw 1 rectangle (" + st.getIterationsType().toUpperCase() + ")");
-        HoloBioFijiUi.showImagePlus(imp);
-        IJ.selectWindow(imp.getTitle());
-        IJ.setTool("rectangle");
-
-        JDialog helper = new JDialog((Frame) null, "HoloBio — Plot region", false);
-        helper.setAlwaysOnTop(true);
-        helper.setLayout(new BorderLayout(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_2));
-        JLabel lab = new JLabel("Draw one rectangle, then Plot.");
-        lab.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_3));
-        helper.add(lab, BorderLayout.CENTER);
-        JButton useRegion = HoloBioUiStyle.primaryButton("Plot");
-        JButton cancel = HoloBioUiStyle.secondaryButton("Cancel");
-        helper.add(HoloBioUiStyle.buildFooter("A rectangle of at least 2×2 px is required.", cancel, useRegion), BorderLayout.SOUTH);
-
-        Runnable closePick = () -> {
-            helper.dispose();
-            imp.changes = false;
-            imp.close();
-            if (hideDlg != null) {
-                hideDlg.setVisible(true);
-                hideDlg.toFront();
-            }
-        };
-
-        useRegion.addActionListener(e -> {
-            Roi roi = imp.getRoi();
-            if (roi == null || roi.getBounds().width < 2 || roi.getBounds().height < 2) {
-                JOptionPane.showMessageDialog(helper,
-                    "Draw a rectangle on the speckle image first.", "HoloBio Speckle",
-                    JOptionPane.WARNING_MESSAGE);
-                return;
-            }
-            Rectangle b = roi.getBounds();
-            st.setPlotRegion(clamp(b.x, 0, w), clamp(b.x + b.width, 0, w),
-                clamp(b.y, 0, h), clamp(b.y + b.height, 0, h));
-            closePick.run();
-            showSpeckleContrastPlot(st);
-        });
-        cancel.addActionListener(e -> closePick.run());
-
-        cancelOnClose(helper, cancel);
-        helper.pack();
-        Window iw = imp.getWindow();
-        if (iw != null) {
-            helper.setLocation(iw.getX() + 20, iw.getY() + 20);
-        }
-        helper.setVisible(true);
-    }
-
-    private static void showSpeckleContrastPlot(HoloBioSpeckleState st) {
-        int x1 = st.getPlotXStart();
-        int x2 = st.getPlotXEnd();
-        int y1 = st.getPlotYStart();
-        int y2 = st.getPlotYEnd();
-        List<Double> rawContrasts = computeIterationContrasts(st, x1, y1, x2, y2);
-        if (rawContrasts.isEmpty()) {
-            HoloBioFijiUi.log("[HoloBio Speckle] No contrasts computed for plot.");
-            return;
-        }
+    private static void showSpeckleContrastPlot(HoloBioSpeckleState st, List<int[]> zones) {
         String type = st.getIterationsType() != null ? st.getIterationsType().toUpperCase() : "?";
-        double c0 = rawContrasts.get(0);
-        if (c0 <= 0) {
-            HoloBioFijiUi.log("[HoloBio Speckle] Warning: first-iteration contrast is zero; normalization skipped.");
-        }
-        double[] xIter = new double[rawContrasts.size()];
-        double[] yNorm = new double[rawContrasts.size()];
-        ResultsTable rt = new ResultsTable();
-        for (int i = 0; i < rawContrasts.size(); i++) {
-            double raw = rawContrasts.get(i);
-            double norm = c0 > 0 ? raw / c0 : raw;
-            xIter[i] = i + 1;
-            yNorm[i] = norm;
-            rt.incrementCounter();
-            rt.addValue("Iteration", i + 1);
-            rt.addValue("Contrast_raw", raw);
-            rt.addValue("Contrast_norm", norm);
-        }
-        rt.show("HoloBio Speckle Plot Data");
-
+        boolean hmf = "HMF".equals(type);
         Plot plot = new Plot("Normalized Speckle Contrast over Iterations (" + type + ")",
             "Iteration", "Normalized Contrast");
-        plot.setLimits(1, Math.max(2, rawContrasts.size()), 0, Math.max(1.05, maxOf(yNorm) * 1.1));
-        plot.setColor(java.awt.Color.BLUE);
-        plot.setLineWidth(2);
-        plot.addPoints(xIter, yNorm, Plot.LINE);
-        plot.addPoints(xIter, yNorm, Plot.CIRCLE);
+        ResultsTable rt = new ResultsTable();
+        StringBuilder legend = new StringBuilder();
+        double yMax = 1.05;
+        int maxIt = 1;
+        for (int k = 0; k < zones.size(); k++) {
+            int[] z = zones.get(k);
+            List<Double> raw = computeIterationContrasts(st, z[0], z[1], z[2], z[3]);
+            if (raw.isEmpty()) {
+                continue;
+            }
+            double c0 = raw.get(0);
+            double[] xs = new double[raw.size()];
+            double[] ys = new double[raw.size()];
+            for (int i = 0; i < raw.size(); i++) {
+                xs[i] = hmf ? i : i + 1;
+                ys[i] = c0 > 0 ? raw.get(i) / c0 : raw.get(i);
+                rt.incrementCounter();
+                rt.addValue("Zone", k + 1);
+                rt.addValue("Iteration", xs[i]);
+                rt.addValue("speckle_contrast", raw.get(i));
+                rt.addValue("speckle_contrast_norm", ys[i]);
+            }
+            yMax = Math.max(yMax, maxOf(ys) * 1.1);
+            maxIt = Math.max(maxIt, (int) xs[xs.length - 1]);
+            java.awt.Color c = QPI_COLORS[k % QPI_COLORS.length];
+            plot.setColor(c);
+            plot.setLineWidth(2);
+            plot.addPoints(xs, ys, Plot.LINE);
+            plot.addPoints(xs, ys, Plot.CIRCLE);
+            if (legend.length() > 0) {
+                legend.append('\n');
+            }
+            legend.append("Zone ").append(k + 1);
+        }
+        plot.setLimits(hmf ? 0 : 1, Math.max(hmf ? 1 : 2, maxIt), 0, yMax);
         plot.setColor(java.awt.Color.BLACK);
         plot.setLineWidth(1);
-        plot.addLabel(0.02, 0.07, String.format("Region: X(%d-%d) Y(%d-%d)", x1, x2, y1, y2));
+        plot.addLegend(legend.toString());
         plot.setFrameSize(640, 384);
         showPlotReplacing(plot);
-        HoloBioFijiUi.log(String.format("[HoloBio Speckle] Plot %s: region X(%d-%d) Y(%d-%d), %d iterations",
-            type, x1, x2, y1, y2, rawContrasts.size()));
+        rt.show("HoloBio Speckle Plot Data");
         IJ.showStatus("HoloBio: speckle contrast plot + table \"HoloBio Speckle Plot Data\".");
     }
 
@@ -1672,71 +1731,63 @@ public final class HoloBioToolDialogs {
         return m;
     }
 
-    private static void pickRegionAndShowProfile(Window hideDlg, float[] original, float[] filtered, int w, int h) {
-        ImagePlus imp = bytePickImage(original, w, h, "Speckle profile — draw 1 rectangle ROI");
-        String instr = "Draw one rectangle, then Done.";
-        runRoiPickSession(imp, instr, 1, hideDlg, ok -> {
-            if (!ok) {
-                return;
-            }
-            RoiManager rm = RoiManager.getInstance();
-            if (rm == null || rm.getCount() < 1) {
-                return;
-            }
-            Rectangle b = rm.getRoi(0).getBounds();
-            int x1 = clamp(b.x, 0, w);
-            int x2 = clamp(b.x + b.width, 0, w);
-            int y1 = clamp(b.y, 0, h);
-            int y2 = clamp(b.y + b.height, 0, h);
-            if (x2 <= x1 || y2 <= y1) {
-                return;
-            }
+    /**
+     * Line profile of each zone: column means of the original and the filtered image, side by
+     * side on the same scale, each with its mean drawn and written on the graph. No table
+     * (item 11). One window: a stack with a slice per zone.
+     */
+    private static void showLineProfiles(float[] original, float[] filtered, int w, List<int[]> zones,
+                                         String filterDesc) {
+        ImageStack stack = null;
+        for (int k = 0; k < zones.size(); k++) {
+            int[] z = zones.get(k);
+            int x1 = z[0], y1 = z[1], x2 = z[2], y2 = z[3];
             int len = x2 - x1;
+            if (len < 2 || y2 <= y1) {
+                continue;
+            }
             double[] xPos = new double[len];
-            double[] profOrig = new double[len];
-            double[] profFilt = new double[len];
+            double[] pO = new double[len];
+            double[] pF = new double[len];
+            double mO = 0, mF = 0;
             for (int col = 0; col < len; col++) {
                 int xx = x1 + col;
                 xPos[col] = xx;
-                double sO = 0;
-                double sF = 0;
+                double sO = 0, sF = 0;
                 for (int yy = y1; yy < y2; yy++) {
-                    int idx = yy * w + xx;
-                    sO += original[idx];
-                    sF += filtered[idx];
+                    sO += original[yy * w + xx];
+                    sF += filtered[yy * w + xx];
                 }
-                profOrig[col] = sO;
-                profFilt[col] = sF;
+                pO[col] = sO / (y2 - y1);
+                pF[col] = sF / (y2 - y1);
+                mO += pO[col];
+                mF += pF[col];
             }
-            // Fix 12: one plot, both profiles divided by their own mean, so the speckle fluctuations
-            // are compared on the same scale instead of in two plots with different ranges.
-            double mO = 0, mF = 0;
-            for (int i = 0; i < len; i++) { mO += profOrig[i]; mF += profFilt[i]; }
-            mO /= len; mF /= len;
-            double[] nO = new double[len], nF = new double[len];
-            for (int i = 0; i < len; i++) {
-                nO[i] = mO != 0 ? profOrig[i] / mO : 0;
-                nF[i] = mF != 0 ? profFilt[i] / mF : 0;
-            }
-            // Python's "Line Profile Comparison": Original (blue) and Filtered (orange) panels side
-            // by side. Both profiles are divided by their mean and share the y range, so the
-            // remaining speckle fluctuation is compared on the same scale.
+            mO /= len;
+            mF /= len;
             double lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
             for (int i = 0; i < len; i++) {
-                lo = Math.min(lo, Math.min(nO[i], nF[i]));
-                hi = Math.max(hi, Math.max(nO[i], nF[i]));
+                lo = Math.min(lo, Math.min(pO[i], pF[i]));
+                hi = Math.max(hi, Math.max(pO[i], pF[i]));
             }
             double padY = (hi - lo) * 0.05 + 1e-9;
             ImageProcessor[] panels = new ImageProcessor[2];
-            for (int k = 0; k < 2; k++) {
-                Plot pk = new Plot(k == 0 ? "Original Image Profile" : "Filtered Image Profile",
-                    "Pixel Position", "Vertical Sum (normalised to mean = 1)");
+            for (int p = 0; p < 2; p++) {
+                boolean orig = p == 0;
+                double mean = orig ? mO : mF;
+                Plot pk = new Plot(orig ? "Original" : (filterDesc != null ? "Filtered (" + filterDesc + ")" : "Filtered"),
+                    "Pixel position", "Column mean (0–255)");
                 pk.setLimits(xPos[0], xPos[len - 1], lo - padY, hi + padY);
-                pk.setColor(k == 0 ? java.awt.Color.BLUE : java.awt.Color.ORANGE);
+                pk.setColor(orig ? java.awt.Color.BLUE : java.awt.Color.ORANGE);
                 pk.setLineWidth(2);
-                pk.addPoints(xPos, k == 0 ? nO : nF, Plot.LINE);
+                pk.addPoints(xPos, orig ? pO : pF, Plot.LINE);
+                pk.setColor(java.awt.Color.DARK_GRAY);
+                pk.setLineWidth(1);
+                pk.drawDottedLine(xPos[0], mean, xPos[len - 1], mean, 3);
+                pk.setColor(java.awt.Color.BLACK);
+                pk.addLabel(0.02, 0.08, String.format(java.util.Locale.US, "mean = %.2f", mean));
                 pk.setFrameSize(480, 320);
-                panels[k] = pk.getProcessor().convertToRGB();
+                panels[p] = pk.getProcessor().convertToRGB();
             }
             int pw = panels[0].getWidth(), ph = panels[0].getHeight(), titleH = 44;
             ColorProcessor fig = new ColorProcessor(pw + panels[1].getWidth(), ph + titleH);
@@ -1748,84 +1799,77 @@ public final class HoloBioToolDialogs {
             fig.setAntialiasedText(true);
             fig.setJustification(ImageProcessor.CENTER_JUSTIFY);
             fig.setFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 18));
-            fig.drawString("Line Profile Comparison", fig.getWidth() / 2, 30);
-            HoloBioFijiUi.showImagePlus(new ImagePlus("Line Profile Comparison", fig));
-            ResultsTable rt = new ResultsTable();
-            for (int i = 0; i < len; i++) {
-                rt.incrementCounter();
-                rt.addValue("Pixel", xPos[i]);
-                rt.addValue("Original", profOrig[i]);
-                rt.addValue("Filtered", profFilt[i]);
+            fig.drawString("Line Profile Comparison — Zone " + (k + 1), fig.getWidth() / 2, 30);
+            if (stack == null) {
+                stack = new ImageStack(fig.getWidth(), fig.getHeight());
             }
-            rt.show("HoloBio Speckle Profile");
-        });
+            if (fig.getWidth() == stack.getWidth() && fig.getHeight() == stack.getHeight()) {
+                stack.addSlice("Zone " + (k + 1), fig);
+            }
+        }
+        if (stack != null && stack.getSize() > 0) {
+            HoloBioFijiUi.showReusing(new ImagePlus("Line Profile Comparison", stack));
+        }
+    }
+
+    /** Receives the zones drawn ({x1, y1, x2, y2} each) and the contrast of every cell. */
+    private interface SpeckleZonesDone {
+        void accept(List<int[]> zones, List<Double> cellContrasts);
     }
 
     /**
-     * Zone contrast on the speckle-filtered 0–255 image for the Filter-tab channel (HMF/SPP output).
+     * Python {@code apply_speckle}: draw each zone rectangle; it is split into rows × cols cells
+     * whose contrast is measured on {@code data}. Drawn on {@code onto} (the channel's output
+     * window, where the numbered grid stays afterwards) or, when null, on a picking window.
      */
-    private static void runSpeckleMeasurements(Window hideDlg, HoloBioToolCallbacks cb, boolean amplitudeChannel,
-                                               int zones, int rows, int cols) {
-        HoloBioSpeckleState st = cb != null ? cb.getSpeckleState() : null;
-        if (st == null || !st.hasFiltered(amplitudeChannel)) {
-            JOptionPane.showMessageDialog(hideDlg,
-                "No filtered image — apply HMF or SPP on the Filter tab first.",
-                "HoloBio Speckle", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        float[] filtered = st.getFiltered(amplitudeChannel);
-        int w = st.getFieldW();
-        int h = st.getFieldH();
-        if (filtered == null || w <= 0 || h <= 0 || filtered.length != w * h) {
-            JOptionPane.showMessageDialog(hideDlg, "Filtered image size mismatch — re-apply the filter.",
-                "HoloBio Speckle", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        float[] data = filtered.clone();
-        String title = amplitudeChannel ? "Speckle — Filtered amplitude" : "Speckle — Filtered phase";
-        runSpeckleZonePicker(hideDlg, data, data.clone(), w, h, title, zones, rows, cols);
-    }
-
-    /**
-     * Python {@code apply_speckle}: draw each zone rectangle on the image; subdivide into rows×cols automatically.
-     */
-    private static void runSpeckleZonePicker(Window hideDlg, float[] rawData, float[] display0255,
-                                           int w, int h, String titleBase, int zoneCount, int rows, int cols) {
-        if (rawData == null || display0255 == null || w <= 0 || h <= 0) {
+    private static void runSpeckleZonePicker(Window hideDlg, float[] data, int w, int h, ImagePlus onto,
+                                             String titleBase, int zoneCount, int rows, int cols,
+                                             SpeckleZonesDone whenDone) {
+        if (data == null || w <= 0 || h <= 0) {
             return;
         }
         if (hideDlg != null) {
             hideDlg.setVisible(false);
         }
-
-        ImagePlus imp = bytePickImage(display0255, w, h, titleBase + " — zone 1/" + zoneCount);
+        boolean temp = onto == null || onto.getWindow() == null;
+        ImagePlus imp = temp ? bytePickImage(data, w, h, titleBase + " — zone 1/" + zoneCount) : onto;
+        Overlay before = !temp && onto.getOverlay() != null ? onto.getOverlay().duplicate() : null;
         Overlay overlay = new Overlay();
         imp.setOverlay(overlay);
-        HoloBioFijiUi.showImagePlus(imp);
-        IJ.selectWindow(imp.getTitle());
+        imp.deleteRoi();
+        if (temp) {
+            HoloBioFijiUi.showImagePlus(imp);
+            IJ.selectWindow(imp.getTitle());
+        } else {
+            ij.WindowManager.setCurrentWindow(imp.getWindow());
+            imp.getWindow().toFront();
+        }
         IJ.setTool("rectangle");
 
         final List<Double> contrasts = new ArrayList<>();
+        final List<int[]> zoneRects = new ArrayList<>();
         final int[] nextLabel = {1};
         final int[] zonesDone = {0};
 
         JDialog helper = new JDialog((Frame) null, "HoloBio — Speckle zones", false);
         helper.setAlwaysOnTop(true);
         helper.setLayout(new BorderLayout(HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_2));
-        JLabel status = new JLabel("Zone 1 / " + zoneCount + " — draw rectangle, then Record");
+        JLabel status = new JLabel("Zone 1 / " + zoneCount + " — draw a rectangle, then Record");
         status.setBorder(HoloBioUiStyle.emptyPad(HoloBioUiStyle.SPACE_2, HoloBioUiStyle.SPACE_3, HoloBioUiStyle.SPACE_1, HoloBioUiStyle.SPACE_3));
         helper.add(status, BorderLayout.NORTH);
         JButton record = HoloBioUiStyle.primaryButton("Record");
         JButton finish = HoloBioUiStyle.secondaryButton("Results");
         finish.setEnabled(false);
         JButton cancel = HoloBioUiStyle.tertiaryButton("Cancel");
-        helper.add(HoloBioUiStyle.buildFooter("Each zone is split into " + rows + "×" + cols + " cells.",
-            cancel, finish, record), BorderLayout.SOUTH);
+        helper.add(HoloBioUiStyle.buildFooter("On \"" + imp.getTitle() + "\"; each zone is split into "
+            + rows + "×" + cols + " cells.", cancel, finish, record), BorderLayout.SOUTH);
 
         Runnable restoreParent = () -> {
             helper.dispose();
-            imp.changes = false;
-            imp.close();
+            if (temp) {
+                imp.changes = false;
+                imp.close();
+            }
             if (hideDlg != null) {
                 hideDlg.setVisible(true);
                 hideDlg.toFront();
@@ -1839,7 +1883,7 @@ public final class HoloBioToolDialogs {
             Roi roi = imp.getRoi();
             if (roi == null || roi.getBounds().width < 2 || roi.getBounds().height < 2) {
                 JOptionPane.showMessageDialog(helper,
-                    "Draw a rectangle on the speckle image first (rectangle tool).",
+                    "Draw a rectangle on the image first (rectangle tool).",
                     "HoloBio Speckle", JOptionPane.WARNING_MESSAGE);
                 return;
             }
@@ -1853,24 +1897,26 @@ public final class HoloBioToolDialogs {
                     JOptionPane.WARNING_MESSAGE);
                 return;
             }
-
-            double[] cellSc = HoloBioQpiSpeckleMath.subdivideZoneContrasts(rawData, w, h, x1, y1, x2, y2, rows, cols);
+            double[] cellSc = HoloBioQpiSpeckleMath.subdivideZoneContrasts(data, w, h, x1, y1, x2, y2, rows, cols);
             if (cellSc.length == 0) {
                 JOptionPane.showMessageDialog(helper,
                     "Zone too small for " + rows + "×" + cols + " subdivision.", "HoloBio Speckle",
                     JOptionPane.WARNING_MESSAGE);
                 return;
             }
-
+            zoneRects.add(new int[] {x1, y1, x2, y2});
             int wSub = (x2 - x1) / cols;
             int hSub = (y2 - y1) / rows;
+            java.awt.Color zc = QPI_COLORS[zonesDone[0] % QPI_COLORS.length];
             for (int r = 0; r <= rows; r++) {
-                int yLine = y1 + r * hSub;
-                overlay.add(new Line(x1, yLine, x2, yLine));
+                Line ln = new Line(x1, y1 + r * hSub, x2, y1 + r * hSub);
+                ln.setStrokeColor(zc);
+                overlay.add(ln);
             }
             for (int c = 0; c <= cols; c++) {
-                int xLine = x1 + c * wSub;
-                overlay.add(new Line(xLine, y1, xLine, y2));
+                Line ln = new Line(x1 + c * wSub, y1, x1 + c * wSub, y2);
+                ln.setStrokeColor(zc);
+                overlay.add(ln);
             }
             for (int rr = 0; rr < rows; rr++) {
                 for (int cc = 0; cc < cols; cc++) {
@@ -1905,8 +1951,10 @@ public final class HoloBioToolDialogs {
             zonesDone[0]++;
             int zd = zonesDone[0];
             if (zd < zoneCount) {
-                imp.setTitle(titleBase + " — zone " + (zd + 1) + "/" + zoneCount);
-                status.setText("Zone " + (zd + 1) + " / " + zoneCount + " — draw rectangle, then Record");
+                if (temp) {
+                    imp.setTitle(titleBase + " — zone " + (zd + 1) + "/" + zoneCount);
+                }
+                status.setText("Zone " + (zd + 1) + " / " + zoneCount + " — draw a rectangle, then Record");
             } else {
                 status.setText("Done — click Results");
                 finish.setEnabled(true);
@@ -1922,10 +1970,16 @@ public final class HoloBioToolDialogs {
                 return;
             }
             restoreParent.run();
-            showSpeckleContrastTable(contrasts);
+            whenDone.accept(zoneRects, contrasts);
         });
 
-        cancel.addActionListener(e -> restoreParent.run());
+        cancel.addActionListener(e -> {
+            if (!temp) {
+                imp.deleteRoi();
+                imp.setOverlay(before);
+            }
+            restoreParent.run();
+        });
 
         cancelOnClose(helper, cancel);
         helper.pack();
@@ -1952,8 +2006,8 @@ public final class HoloBioToolDialogs {
             rt.incrementCounter();
             rt.addLabel("z" + id);
             rt.addValue("Zone", id++);
-            rt.addValue("Speckle_Contrast", scRaw);
-            rt.addValue("Speckle_Contrast_norm", scRaw / (maxRaw + 1e-9));
+            rt.addValue("speckle_contrast", scRaw);
+            rt.addValue("speckle_contrast_norm", scRaw / (maxRaw + 1e-9));
         }
         double sumR = 0;
         double sumN = 0;
@@ -1966,8 +2020,8 @@ public final class HoloBioToolDialogs {
             rt.incrementCounter();
             rt.addLabel("Average");
             rt.addValue("Zone", "Average");
-            rt.addValue("Speckle_Contrast", sumR / n);
-            rt.addValue("Speckle_Contrast_norm", sumN / n);
+            rt.addValue("speckle_contrast", sumR / n);
+            rt.addValue("speckle_contrast_norm", sumN / n);
         }
         rt.show("HoloBio Speckle");
         HoloBioFijiUi.log("[HoloBio Speckle] sub-cells=" + n + " max_contrast=" + maxRaw);

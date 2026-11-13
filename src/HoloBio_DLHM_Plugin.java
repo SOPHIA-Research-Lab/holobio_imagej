@@ -38,6 +38,10 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
     private ImagePlus holoImage;
     private int       holoW, holoH;
     private float[]   holoPixels;
+    /** The Fiji image linked as hologram; Reconstruct links another one when it is clicked (item 6). */
+    private ImagePlus linkedImp;
+    /** Image scale (Analysis tools > Set scale): sensor pitch and magnification; NaN = from the optics. */
+    private double    scalePitch = Double.NaN, scaleMag = Double.NaN;
 
     private float[]   referencePixels;
     private String    referenceTitle;
@@ -143,8 +147,8 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
             log("Reference cleared.");
         });
 
-        JComboBox<String> toolsMenu = new JComboBox<>(new String[]{"Analysis tools", "Speckle", "QPI"});
-        toolsMenu.setToolTipText("Open Speckle or QPI on the current reconstruction.");
+        JComboBox<String> toolsMenu = new JComboBox<>(new String[]{"Analysis tools", "Set scale", "Speckle", "QPI"});
+        toolsMenu.setToolTipText("Set the \u00b5m scale, or open Speckle or QPI, on the current reconstruction.");
         HoloBioUiStyle.styleField(toolsMenu);
         HoloBioUiStyle.sizeField(toolsMenu, 120);
         toolsMenu.addActionListener(e -> {
@@ -428,8 +432,10 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
 
     private void loadHologramFromImagePlus(ImagePlus imp) {
         try {
-            ImagePlus dup = imp.duplicate();
-            FloatProcessor fp = (FloatProcessor) dup.getProcessor().convertToFloat();
+            // First plane only: duplicating a whole stack held it twice in memory (item 20).
+            ImageProcessor first = imp.getStackSize() > 1 ? imp.getStack().getProcessor(1) : imp.getProcessor();
+            FloatProcessor fp = (FloatProcessor) first.convertToFloatProcessor().duplicate();
+            linkedImp = imp;
             holoW = fp.getWidth();
             holoH = fp.getHeight();
             holoPixels = (float[]) fp.getPixels();
@@ -503,6 +509,13 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
     // Reconstruction
     // =========================================================================
     private void onReconstruct() {
+        // As Fiji commands do, act on the image clicked last: a hologram other than the linked
+        // one (and not a HoloBio output) is linked first (item 6).
+        ImagePlus clicked = WindowManager.getCurrentImage();
+        if (clicked != null && clicked != linkedImp && !isDlhmWindow(clicked)) {
+            loadHologramFromImagePlus(clicked);
+            log("Using clicked Fiji image as hologram: " + clicked.getTitle());
+        }
         if (holoPixels == null) {
             ImagePlus active = WindowManager.getCurrentImage();
             if (active != null) {
@@ -711,11 +724,55 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
     // =========================================================================
     private void onToolSelected(String tool) {
         HoloBioToolInputs inputs = buildToolInputs();
-        if ("Speckle".equals(tool)) {
+        if ("Set scale".equals(tool)) {
+            onSetScale();
+        } else if ("Speckle".equals(tool)) {
             HoloBioFijiUi.showSpeckleDialog(frame, inputs, this);
         } else if ("QPI".equals(tool) || "Bio-Analysis".equals(tool)) {
-            HoloBioFijiUi.showQpiDialog(frame, inputs);
+            HoloBioFijiUi.showQpiDialog(frame, inputs, this);
         }
+    }
+
+    /** Set scale (item 14): sensor pitch / magnification gives the \u00b5m per pixel of the outputs. */
+    private void onSetScale() {
+        double pitch = scalePitch > 0 ? scalePitch : params.getPixelPitchUm();
+        double mag = scaleMag > 0 ? scaleMag : Math.abs(params.getMagnification());
+        double[] chosen = HoloBioUiStyle.showSetScaleDialog(frame, "DLHM", pitch, pitch, mag);
+        if (chosen == null) {
+            return;
+        }
+        scalePitch = chosen[0];
+        scaleMag = chosen[2];
+        for (String t : new String[] {"DLHM Amplitude", "DLHM Phase"}) {
+            ImagePlus imp = WindowManager.getImage(t);
+            if (imp != null) {
+                applyScale(imp);
+                imp.repaintWindow();
+            }
+        }
+        setStatus(String.format(java.util.Locale.US, "Scale: %.4g \u00b5m/px", scalePitch / scaleMag));
+    }
+
+    /** \u00b5m-per-pixel scale of the outputs: pitch / M (Set scale, else the reconstruction optics). */
+    private void applyScale(ImagePlus imp) {
+        double pitch = scalePitch > 0 ? scalePitch : params.getPixelPitchUm();
+        double mag = scaleMag > 0 ? scaleMag : Math.abs(params.getMagnification());
+        if (imp == null || !(pitch > 0) || !(mag > 0)) {
+            return;
+        }
+        ij.measure.Calibration cal = imp.getCalibration().copy();
+        cal.pixelWidth = pitch / mag;
+        cal.pixelHeight = pitch / mag;
+        cal.setUnit("\u00b5m");
+        imp.setCalibration(cal);
+    }
+
+    /** DLHM outputs and HoloBio figures are never linked as holograms. */
+    private static boolean isDlhmWindow(ImagePlus imp) {
+        String t = imp.getTitle();
+        return imp.getWindow() instanceof ij.gui.PlotWindow || t == null || t.startsWith("DLHM ")
+            || t.startsWith("HoloBio") || t.startsWith("Speckle") || t.startsWith("Line Profile")
+            || t.startsWith("Phase profiles");
     }
 
     private HoloBioToolInputs buildToolInputs() {
@@ -758,11 +815,37 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
         currentFieldRe = fieldRe;
         currentFieldIm = fieldIm;
         fieldW = w; fieldH = h;
-        onSpeckleFilterResult(amplitudeChannel, display0255);
+        // SPP changes the complex field, so both amplitude and phase are redrawn from it.
+        showResults();
+        float[] px = (float[]) display0255.getPixels();
+        if (amplitudeChannel) speckleState.setFilteredAmplitude(px);
+        else speckleState.setFilteredPhase(px);
     }
 
     @Override
     public HoloBioSpeckleState getSpeckleState() { return speckleState; }
+
+    @Override
+    public HoloBioToolInputs currentInputs() { return buildToolInputs(); }
+
+    @Override
+    public ImagePlus outputImage(boolean amplitude) {
+        ImagePlus imp = WindowManager.getImage(amplitude ? "DLHM Amplitude" : "DLHM Phase");
+        return imp != null && imp.getWindow() != null ? imp : null;
+    }
+
+    /** The DLHM phase when a DLHM window or the hologram was clicked last; any other image as it is. */
+    @Override
+    public ImagePlus qpiPhaseImage() {
+        ImagePlus a = WindowManager.getCurrentImage();
+        if (a == null || a == linkedImp || isDlhmWindow(a)) {
+            return outputImage(false);
+        }
+        return a;
+    }
+
+    @Override
+    public double wavelengthUmFor(ImagePlus phaseImage) { return params.getWavelengthUm(); }
 
     // =========================================================================
     // Helpers
@@ -789,12 +872,21 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
      */
     private void showInFiji(ImagePlus imp, String title) {
         ImagePlus existing = WindowManager.getImage(title);
-        if (existing != null && existing.getWindow() != null && !existing.getWindow().isClosed()
-                && existing.getStackSize() == 1
-                && existing.getWidth() == imp.getWidth() && existing.getHeight() == imp.getHeight()) {
+        if (existing != null && existing.getWindow() != null && !existing.getWindow().isClosed()) {
+            // Reused also when the size changes (e.g. switching to the cropped Kreuzer view):
+            // the window's content is swapped instead of closing it and opening another (item 20).
+            boolean sameSize = existing.getStackSize() == 1
+                && existing.getWidth() == imp.getWidth() && existing.getHeight() == imp.getHeight();
             final ImageProcessor ip = imp.getProcessor().duplicate();
             Runnable update = () -> {
-                existing.setProcessor(ip);
+                if (sameSize) {
+                    existing.setProcessor(ip);
+                } else {
+                    existing.setImage(new ImagePlus(title, ip));
+                    existing.setTitle(title);
+                    existing.setOverlay(null);
+                }
+                applyScale(existing);
                 existing.resetDisplayRange();
                 existing.updateAndDraw();
                 existing.changes = false;
@@ -803,9 +895,9 @@ public class HoloBio_DLHM_Plugin implements PlugIn, HoloBioToolCallbacks {
             else javax.swing.SwingUtilities.invokeLater(update);
             return;
         }
-        if (existing != null) { existing.changes = false; existing.close(); }
         ImagePlus out = imp.duplicate();
         out.setTitle(title);
+        applyScale(out);
         HoloBioFijiUi.showImagePlus(out);
     }
 

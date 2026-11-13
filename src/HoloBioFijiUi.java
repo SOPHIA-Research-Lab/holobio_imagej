@@ -181,6 +181,38 @@ public final class HoloBioFijiUi {
     }
 
     /**
+     * Show {@code imp} in the open window of the same title when there is one (its content is
+     * swapped in place), else in a new window. Returns the image that is on screen. Figures that
+     * are redrawn on every click use this: closing a window and opening another destroys and
+     * creates a native window, which crashed the Intel graphics driver (igxelpicd64.dll) on the
+     * development machine when it happened often. Call on the event thread.
+     */
+    public static ImagePlus showReusing(ImagePlus imp) {
+        if (imp == null || imp.getProcessor() == null) {
+            return null;
+        }
+        String title = imp.getTitle() == null || imp.getTitle().isEmpty() ? "HoloBio" : imp.getTitle();
+        ImagePlus existing = WindowManager.getImage(title);
+        if (existing != null && existing != imp && existing.getWindow() != null
+                && !(existing.getWindow() instanceof ij.gui.PlotWindow)) {
+            existing.setImage(imp);
+            existing.setTitle(title);
+            existing.setOverlay(imp.getOverlay());
+            existing.changes = false;
+            existing.getWindow().toFront();
+            return existing;
+        }
+        if (existing != null && existing != imp) {
+            existing.changes = false;
+            existing.close();
+        }
+        imp.setTitle(title);
+        imp.show();
+        imp.changes = false;
+        return imp;
+    }
+
+    /**
      * Add a snapshot to the Fiji image called {@code title}: the first one opens a normal Fiji
      * image; later ones are appended to it as new slices (labelled {@code sliceLabel}) and the
      * same window shows them. A new image is opened only if that window was closed or the
@@ -228,9 +260,14 @@ public final class HoloBioFijiUi {
      * on the application class loader (which cannot see {@code plugins/*.jar}).
      */
     public static void showQpiDialog(Frame owner, HoloBioToolInputs inputs) {
+        showQpiDialog(owner, inputs, null);
+    }
+
+    /** QPI on the phase image the plugin resolves for the image clicked last ({@code callbacks}). */
+    public static void showQpiDialog(Frame owner, HoloBioToolInputs inputs, HoloBioToolCallbacks callbacks) {
         invokeToolDialog("showBioAnalysisDialog",
-            new Class[] { Frame.class, HoloBioToolInputs.class },
-            new Object[] { owner, inputs },
+            new Class[] { Frame.class, HoloBioToolInputs.class, HoloBioToolCallbacks.class },
+            new Object[] { owner, inputs, callbacks },
             "QPI");
     }
 
